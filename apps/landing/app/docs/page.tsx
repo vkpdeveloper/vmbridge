@@ -2,6 +2,7 @@ import { ArrowDown01Icon, ArrowRight01Icon, GithubIcon } from "@hugeicons/core-f
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { Metadata } from "next";
 import Link from "next/link";
+import { Fragment } from "react";
 import { Footer, Nav } from "@/components/Chrome";
 import { ProviderLogo } from "@/components/brand";
 import { Command, CopyButton } from "@/components/CopyButton";
@@ -106,7 +107,8 @@ function Code({ children }: { children: string }) {
 function Block({ children }: { children: string }) {
   return (
     <div className="relative rounded-md bg-card">
-      <pre className="overflow-x-auto p-4 pr-12 font-mono text-[13px] leading-6 text-foreground">{children}</pre>
+      {/* Long lines wrap rather than scroll sideways; the copy button still copies the exact text. */}
+      <pre className="p-4 pr-12 font-mono text-[13px] leading-6 whitespace-pre-wrap text-foreground [overflow-wrap:anywhere]">{children}</pre>
       <CopyButton text={children} className="absolute top-2 right-2" />
     </div>
   );
@@ -125,11 +127,16 @@ function List({ items }: { items: React.ReactNode[] }) {
   );
 }
 
-function Table({ head, rows }: { head: React.ReactNode[]; rows: React.ReactNode[][] }) {
+/**
+ * From sm a plain table. Below sm each row stacks into a block, the first cell as its
+ * title and every other cell under its column name, so a phone never scrolls sideways.
+ * The wrapper still scrolls as a quiet fallback if a wide row ever outgrows the column.
+ */
+function Table({ head, rows }: { head: string[]; rows: React.ReactNode[][] }) {
   return (
-    <div className="overflow-x-auto rounded-md border border-white/10">
-      <table className="w-full min-w-[560px] text-left text-sm">
-        <thead className="bg-card">
+    <div className="scrollbar-quiet overflow-x-auto rounded-md border border-white/10">
+      <table className="w-full text-left text-sm max-sm:block sm:min-w-[560px]">
+        <thead className="bg-card max-sm:hidden">
           <tr>
             {head.map((cell, i) => (
               <th key={i} className="px-4 py-2.5 font-mono text-[12px] font-normal text-faint">
@@ -138,11 +145,15 @@ function Table({ head, rows }: { head: React.ReactNode[]; rows: React.ReactNode[
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-white/10">
+        <tbody className="divide-y divide-white/10 max-sm:block">
           {rows.map((row, i) => (
-            <tr key={i}>
+            <tr key={i} className="max-sm:block max-sm:px-4 max-sm:py-3">
               {row.map((cell, j) => (
-                <td key={j} className={`px-4 py-2.5 align-top ${j === 0 ? "text-foreground" : ""}`}>
+                <td
+                  key={j}
+                  data-label={head[j]}
+                  className={`px-4 py-2.5 align-top max-sm:block max-sm:p-0 ${j === 0 ? "text-foreground" : "max-sm:mt-2 max-sm:before:block max-sm:before:font-mono max-sm:before:text-[12px] max-sm:before:text-faint max-sm:before:content-[attr(data-label)]"}`}
+                >
                   {cell}
                 </td>
               ))}
@@ -184,7 +195,7 @@ export default function Docs() {
 
         <div className="border-t border-white/10 lg:grid lg:grid-cols-[15rem_minmax(0,1fr)]">
           <aside className="hidden border-r border-white/10 lg:block">
-            <div className="sticky top-14 max-h-[calc(100vh-3.5rem)] overflow-y-auto px-6 py-10">
+            <div className="scrollbar-quiet sticky top-14 max-h-[calc(100vh-3.5rem)] overflow-y-auto px-6 py-10">
               <DocsNav groups={groups} />
             </div>
           </aside>
@@ -237,8 +248,15 @@ bun run compile        # dist/vmbridge
               <Table
                 head={["Command", "What it does"]}
                 rows={commands.map((c) => [
-                  <code key="c" className="font-mono text-[13px] whitespace-nowrap">
-                    {c.command} <span className="text-faint">{c.args}</span>
+                  <code key="c" className="font-mono text-[13px] sm:whitespace-nowrap">
+                    {c.command}{" "}
+                    {/* On phones the line wraps between options, never inside one at its hyphens. */}
+                    {c.args.split(" [").map((arg, i) => (
+                      <Fragment key={i}>
+                        {i > 0 ? " " : null}
+                        <span className="whitespace-nowrap text-faint">{i > 0 ? `[${arg}` : arg}</span>
+                      </Fragment>
+                    ))}
                   </code>,
                   c.does,
                 ])}

@@ -11,6 +11,9 @@
   --border: rgb(255 255 255 / 0.08);
   --primary: #8b5cf6;
   --radius: 6px;
+  /* The dashboard's #2a2a2a and #5c5c5c scrollbar thumb, as white over this background. */
+  --scrollbar: rgb(255 255 255 / 0.14);
+  --scrollbar-hover: rgb(255 255 255 / 0.34);
 }
 
 @theme inline {
@@ -64,6 +67,45 @@
   html:not(.js) [data-slot="accordion-content"][hidden] {
     display: block !important;
   }
+}
+
+/* Scrollbars match the dashboard: a thin rounded thumb on no track, the transparent
+   border insetting it from the edge. Chrome ignores the pseudo-elements once
+   scrollbar-color is set, so that is only for Firefox. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: var(--scrollbar) padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-hover);
+}
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar) transparent;
+  }
+}
+
+/* Inner scrollers that should barely show: a thin bar whose thumb stays transparent
+   until the pointer or keyboard focus is on the scroller. Scrolling itself is untouched.
+   This uses the standard properties, not the pseudo-elements above: Chrome does not
+   repaint a ::-webkit-scrollbar-thumb when its scroller starts being hovered. */
+.scrollbar-quiet {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.scrollbar-quiet:hover,
+.scrollbar-quiet:focus-within {
+  scrollbar-color: var(--scrollbar) transparent;
 }
 
 /* Short viewports: at xl and up, tighten sections so a split still fits one screen. */
