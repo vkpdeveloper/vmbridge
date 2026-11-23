@@ -69,7 +69,7 @@ export function PillTabs({
         : "xl:flex-col xl:overflow-visible";
   const atItem =
     verticalAt === "always" ? "w-full shrink text-left" : verticalAt === "lg" ? "lg:w-full lg:shrink lg:text-left" : "xl:w-full xl:shrink xl:text-left";
-  const atDetail = verticalAt === "always" ? "" : verticalAt === "lg" ? "hidden lg:block" : "hidden xl:block";
+  const atDetail = verticalAt === "always" ? "block" : verticalAt === "lg" ? "hidden lg:block" : "hidden xl:block";
 
   const measure = useCallback(() => {
     const el = buttons.current.get(active);

@@ -103,6 +103,8 @@ export function Lifecycle() {
 
   const send = () => {
     if (phase === "waking" || streaming) return;
+    // Busy from now until the reply finishes, so a second Send cannot slip in before it starts.
+    setStreaming(true);
     const exchange = exchanges[index % exchanges.length];
     setIndex((index + 1) % exchanges.length);
     push({ id: nextId.current++, kind: "user", text: exchange.message, animate: true });

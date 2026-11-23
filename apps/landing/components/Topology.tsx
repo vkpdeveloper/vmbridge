@@ -153,7 +153,7 @@ function VmNode({ vm, provider, narrow, onToggle }: { vm: Vm; provider: Provider
       type="button"
       onClick={onToggle}
       aria-label={`${vm.project}: ${stateLabel(vm.state)}`}
-      className={`${narrow ? "w-60" : "w-52"} rounded-md bg-muted p-3 text-left transition-colors duration-150 hover:bg-white/10`}
+      className={`${narrow ? "w-full max-w-60" : "w-52"} rounded-md bg-muted p-3 text-left transition-colors duration-150 hover:bg-white/10`}
     >
       <div className="flex items-center gap-2.5">
         <ProviderLogo provider={provider} className={`size-7 rounded-md ring-white/10 transition-opacity duration-200 ${asleep ? "opacity-50" : ""}`} />
@@ -287,7 +287,8 @@ export function Topology({ stacked = false, log = true, hero = false }: { stacke
           {vms.map((vm) => (
             <div
               key={vm.id}
-              className="absolute -translate-y-1/2"
+              // Spans to the diagram's right edge so the card shrinks on very narrow screens.
+              className="absolute right-0 -translate-y-1/2"
               style={{ left: `${(layouts.narrow.cardX / layouts.narrow.w) * 100}%`, top: `${(layouts.narrow.vmY[vm.id] / layouts.narrow.h) * 100}%` }}
             >
               <VmNode vm={vm} provider={providerOf(vm.providerId)} narrow onToggle={() => toggle(vm.id)} />

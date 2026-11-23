@@ -52,6 +52,8 @@ export function LiveTerminal({
   const [hIndex, setHIndex] = useState(-1);
   const [value, setValue] = useState("");
   const [scrolled, setScrolled] = useState(false);
+  const pending = useRef<{ lines: string[]; timers: ReturnType<typeof setTimeout>[] }>({ lines: [], timers: [] });
+  useEffect(() => () => pending.current.timers.forEach(clearTimeout), []);
 
   useEffect(() => {
     if (reduced) {
@@ -101,12 +103,28 @@ export function LiveTerminal({
       return;
     }
     const step = Math.min(25, 600 / output.length);
-    output.forEach((text, i) => setTimeout(() => setLines((l) => [...l, text]), step * (i + 1)));
+    pending.current = { lines: [...output], timers: [] };
+    pending.current.timers = output.map((text, i) =>
+      setTimeout(() => {
+        pending.current.lines.shift();
+        setLines((l) => [...l, text]);
+      }, step * (i + 1)),
+    );
+  };
+
+  /** Stops output still printing: `flush` prints the rest at once, otherwise it is dropped. */
+  const stopPrinting = (flush: boolean) => {
+    const { lines: rest, timers } = pending.current;
+    timers.forEach(clearTimeout);
+    pending.current = { lines: [], timers: [] };
+    if (flush && rest.length) setLines((l) => [...l, ...rest]);
   };
 
   /** Run one command exactly as if typed: echo it, print its output, or answer it. */
   const run = (raw: string) => {
     const name = raw.trim().toLowerCase();
+    // The previous command's output finishes before this one echoes, and `clear` drops it.
+    stopPrinting(name !== "clear");
     if (!name) {
       setLines((l) => [...l, "$"]);
       return;

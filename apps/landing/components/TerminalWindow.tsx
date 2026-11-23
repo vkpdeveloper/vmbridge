@@ -58,7 +58,7 @@ export function UrlText({ url }: { url: string }) {
 export function TerminalLine({ text, labels = 0, className = "" }: { text: string; labels?: number; className?: string }) {
   if (text.startsWith("$")) {
     return (
-      <div className={className}>
+      <div className={`[overflow-wrap:anywhere] ${className}`}>
         <span className="text-faint">$</span> {text.slice(2)}
       </div>
     );
