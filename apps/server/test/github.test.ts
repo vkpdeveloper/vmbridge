@@ -6,6 +6,14 @@ const answer = (response: Response) => spyOn(globalThis, "fetch").mockResolvedVa
 afterEach(() => mock.restore());
 
 describe("GitHub token check", () => {
+  test("sends a User-Agent, which GitHub requires and Cloudflare Workers leave out", async () => {
+    const fetch = answer(Response.json({ id: 1, login: "octocat", name: null, avatar_url: "", html_url: "" }));
+    await fetchGitHubAccount("github_pat_right");
+    const headers = new Headers(fetch.mock.calls[0]![1]!.headers);
+    expect(headers.get("user-agent")).toBe("vmbridge");
+    expect(headers.get("authorization")).toBe("Bearer github_pat_right");
+  });
+
   test("a token GitHub refuses gives a plain error", async () => {
     answer(new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 }));
     const check = fetchGitHubAccount("github_pat_wrong");
