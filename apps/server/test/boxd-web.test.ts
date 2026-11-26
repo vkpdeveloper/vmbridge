@@ -256,6 +256,34 @@ describe("the provider maps boxd calls", () => {
     await expect(provider.connect("not-sdk")).rejects.toMatchObject({ code: "not_found" });
   });
 
+  test("malformed metadata on one machine is skipped by list and find while connect reports a provider error", async () => {
+    const { client, machines } = fakeBoxd();
+    const provider = boxdWeb(client, { apiKey });
+    await provider.create({ key: "healthy", labels: { vmbridge: "bridge-1" } });
+    await provider.create({ key: "sleeping-healthy", labels: { vmbridge: "bridge-1" } });
+    await provider.pause?.("vm-2");
+    machines.set("corrupt-json", { id: "corrupt-json", name: "sbxsdk-corrupt", status: "running", createdAt: null });
+    machines.set("corrupt-labels-array", { id: "corrupt-labels-array", name: "sbxsdk-array", status: "running", createdAt: null });
+    machines.set("corrupt-label-value", { id: "corrupt-label-value", name: "sbxsdk-num", status: "running", createdAt: null });
+    machines.set("corrupt-sleeping", { id: "corrupt-sleeping", name: "sbxsdk-sleep-bad", status: "suspended", createdAt: null });
+    const put = (id: string, body: string) =>
+      client.machines.files.upload(id, "/var/lib/sandbox-sdk/metadata.json", new TextEncoder().encode(body));
+    await put("corrupt-json", "{truncated");
+    await put("corrupt-labels-array", JSON.stringify({ labels: [], createdAt: 1 }));
+    await put("corrupt-label-value", JSON.stringify({ labels: { vmbridge: "bridge-1", owner: 42 }, createdAt: 1 }));
+    await put("corrupt-sleeping", "{truncated");
+
+    expect((await provider.list({})).map((info) => info.key)).toEqual(["healthy"]);
+    expect((await provider.list({ vmbridge: "bridge-1" })).map((info) => info.key)).toEqual(["healthy"]);
+    expect((await provider.find("healthy"))?.id).toBe("vm-1");
+    expect((await provider.find("sleeping-healthy"))?.id).toBe("vm-2");
+    expect(await provider.find("missing-key")).toBeUndefined();
+    await expect(provider.connect("corrupt-json")).rejects.toMatchObject({ code: "provider" });
+    await expect(provider.connect("corrupt-labels-array")).rejects.toMatchObject({ code: "provider" });
+    await expect(provider.connect("corrupt-label-value")).rejects.toMatchObject({ code: "provider" });
+    await expect(provider.connect("corrupt-sleeping")).rejects.toMatchObject({ code: "provider" });
+  });
+
   test("snapshots wait until ready, and deleting one already gone is fine", async () => {
     const { client } = fakeBoxd();
     const provider = boxdWeb(client, { apiKey });

@@ -161,6 +161,7 @@ export function boxdWeb(client: BoxdWebClient, options: BoxdWebOptions): BoxdWeb
   };
 
   const notSdkMachine = (id: string) => fail("Not an SDK machine", "not_found", id);
+  const invalidMetadata = "Invalid SDK metadata";
 
   async function describe(machine: MachineSummary): Promise<SandboxInfo> {
     if (!machine.name.startsWith("sbxsdk-")) throw notSdkMachine(machine.id);
@@ -172,9 +173,23 @@ export function boxdWeb(client: BoxdWebClient, options: BoxdWebOptions): BoxdWeb
       if (mapped.code === "file_not_found") throw fail("SDK metadata is missing", "not_found", machine.id);
       throw mapped;
     }
-    const metadata: unknown = JSON.parse(text);
-    if (typeof metadata !== "object" || metadata === null || !("labels" in metadata) || !("createdAt" in metadata)) {
-      throw fail("Invalid SDK metadata", "not_found", machine.id);
+    let metadata: unknown;
+    try {
+      metadata = JSON.parse(text);
+    } catch {
+      throw fail(invalidMetadata, "provider", machine.id);
+    }
+    if (
+      typeof metadata !== "object" ||
+      metadata === null ||
+      !("labels" in metadata) ||
+      !("createdAt" in metadata) ||
+      (metadata.labels !== null &&
+        (typeof metadata.labels !== "object" ||
+          Array.isArray(metadata.labels) ||
+          !Object.values(metadata.labels).every((value) => typeof value === "string")))
+    ) {
+      throw fail(invalidMetadata, "provider", machine.id);
     }
     const key = "key" in metadata && typeof metadata.key === "string" ? metadata.key : undefined;
     const labels = (metadata.labels ?? {}) as Record<string, string>;
@@ -187,7 +202,7 @@ export function boxdWeb(client: BoxdWebClient, options: BoxdWebOptions): BoxdWeb
     try {
       return await describe(machine);
     } catch (error) {
-      if (error instanceof SandboxError && error.code === "not_found") return null;
+      if (error instanceof SandboxError && (error.code === "not_found" || error.message === invalidMetadata)) return null;
       throw error;
     }
   }
