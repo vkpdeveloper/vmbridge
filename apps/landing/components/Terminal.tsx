@@ -5,7 +5,7 @@ import { useInView, useReducedMotion } from "@/lib/hooks";
 
 /* A pretend zsh session running the real VM Bridge CLI. Every vmbridge string below is copied from apps/cli. */
 
-const version = "1.1.12";
+const version = "1.1.13";
 const defaultPort = 3774;
 const home = "/Users/you";
 const dataDir = `${home}/.vmbridge`;
