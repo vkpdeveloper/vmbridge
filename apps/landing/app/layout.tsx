@@ -1,3 +1,4 @@
+import { GoogleTagManager } from "@next/third-parties/google";
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { SmoothScroll } from "@/components/SmoothScroll";
@@ -26,6 +27,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* Flags JS availability before paint so `.reveal` blocks only hide when they can be revealed. */}
         <script dangerouslySetInnerHTML={{ __html: "document.documentElement.classList.add('js')" }} />
       </head>
+      {/* Production only, so local dev visits stay out of the analytics. */}
+      {process.env.NODE_ENV === "production" && <GoogleTagManager gtmId="GTM-NLMD5J6R" />}
       <body>
         {children}
         <SmoothScroll />
