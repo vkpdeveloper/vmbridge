@@ -8,8 +8,10 @@ import { recordingBox } from "./vm-program.ts";
 import { testEncryption } from "./key.ts";
 
 const realFetch = globalThis.fetch;
+const realSetTimeout = globalThis.setTimeout;
 afterEach(() => {
   globalThis.fetch = realFetch;
+  globalThis.setTimeout = realSetTimeout;
 });
 
 /** Answers every request with `answer`, and records what was asked. */
@@ -96,6 +98,26 @@ describe("agent sign-in profiles", () => {
 
     auth.remove(proxy.id);
     expect(auth.list().map((profile) => [profile.id, profile.inUse])).toEqual([[subscription.id, true]]);
+  });
+
+  test("works with numeric setTimeout handles without unref (Workers)", async () => {
+    const { auth } = setup();
+    const delays: number[] = [];
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    globalThis.setTimeout = ((_fn: (...args: unknown[]) => void, ms = 0) =>
+      delays.push(ms) as unknown as ReturnType<typeof setTimeout>) as typeof setTimeout;
+    try {
+      expect(auth.startClaudeLogin().id).toBeTruthy();
+      await signInCodex(auth, codexFile("acct-1", "refresh-1", 10 * day));
+      await Bun.sleep(5);
+      expect(delays).toEqual([15 * 60_000, 10 * 60_000]);
+      expect(unhandled).toEqual([]);
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });
 

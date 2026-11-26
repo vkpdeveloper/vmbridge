@@ -167,7 +167,7 @@ export class AgentAuth {
       })
       .finally(() => {
         this.onChange();
-        setTimeout(() => this.logins.delete(login.id), 10 * 60_000).unref();
+        setTimeout(() => this.logins.delete(login.id), 10 * 60_000).unref?.();
       });
     return this.codexLogin(login.id)!;
   }
@@ -188,7 +188,7 @@ export class AgentAuth {
     const id = crypto.randomUUID();
     const signIn = startClaudeSignIn();
     this.claudeLogins.set(id, signIn);
-    setTimeout(() => this.claudeLogins.delete(id), 15 * 60_000).unref();
+    setTimeout(() => this.claudeLogins.delete(id), 15 * 60_000).unref?.();
     return { id, url: signIn.url };
   }
 
