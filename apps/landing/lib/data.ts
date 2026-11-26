@@ -167,7 +167,7 @@ export type Agent = (typeof agents)[number];
 
 /** Real terminal output beside each step, index-matched to copy.steps.items. */
 export const stepLogs: string[][] = [
-  ["$ vmbridge", "VM Bridge 1.1.13 is running.", "  This machine         http://127.0.0.1:3774/dashboard"],
+  ["$ vmbridge", "VM Bridge 1.1.14 is running.", "  This machine         http://127.0.0.1:3774/dashboard"],
   ["Provider boxd connected", "Size: 2 vCPU, 8 GB", "Sleep after 5 idle minutes"],
   ['Pairing link "MacBook" created', "MacBook paired", "iPhone paired"],
   ["Creating a VM for Hello-World", "Installing T3, Codex and Claude", "vm-df9bca ready on boxd", "Cloned Hello-World"],
@@ -180,7 +180,7 @@ export const stepLogs: string[][] = [
 export const cliScripts: string[][] = [
   [
     "$ vmbridge",
-    "VM Bridge 1.1.13 is running.",
+    "VM Bridge 1.1.14 is running.",
     "",
     "  This machine         http://127.0.0.1:3774/dashboard",
     "  Local network (en0)  http://192.168.1.20:3774/dashboard",
