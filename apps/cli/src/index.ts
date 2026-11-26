@@ -212,9 +212,14 @@ async function main() {
     case "service":
       if (subcommand === "install") {
         await ensureKey();
-        const existing = runningPid();
-        if (existing) throw new Error(`VM Bridge is already running in a terminal (process ${existing}). Stop it first.`);
         const options = serverOptions(values);
+        const existing = runningPid();
+        const servicePid = await service.pid();
+        if (existing && existing !== servicePid) {
+          throw new Error(`VM Bridge is already running in a terminal (process ${existing}). Stop it first.`);
+        }
+        // Ask the running service to exit for a restart so devices stay connected with 1012 and idle VMs stay awake.
+        if (servicePid) await stopProcess(servicePid, restartSignal, restartDeadlineMs + 5_000);
         await service.install(options);
         return console.log(`VM Bridge now runs in the background on port ${options.port}. Logs: ${service.logLocation()}`);
       }

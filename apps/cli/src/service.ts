@@ -112,6 +112,7 @@ ${env}
 `,
     );
     await exec(["launchctl", "bootout", `${this.domain()}/${label}`]);
+    for (let i = 0; i < 20 && (await exec(["launchctl", "print", `${this.domain()}/${label}`])).ok; i++) await Bun.sleep(100);
     await must(["launchctl", "bootstrap", this.domain(), this.plist()]);
   },
 
