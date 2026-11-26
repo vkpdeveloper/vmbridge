@@ -2,12 +2,25 @@ import type { GitHubAccount } from "@vmbridge/contracts";
 
 export class GitHubRejected extends Error {}
 
+/**
+ * Headers for GitHub's REST API. GitHub answers 403 to a request with no User-Agent, and only some runtimes add one:
+ * Bun does, Cloudflare Workers do not.
+ */
+export function githubHeaders(token?: string): Record<string, string> {
+  return {
+    accept: "application/vnd.github+json",
+    "user-agent": "vmbridge",
+    "x-github-api-version": "2022-11-28",
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+  };
+}
+
 /** Reads the account a personal access token belongs to, with the token's scopes and expiry. */
 export async function fetchGitHubAccount(token: string): Promise<GitHubAccount> {
   let response: Response;
   try {
     response = await fetch("https://api.github.com/user", {
-      headers: { accept: "application/vnd.github+json", authorization: `Bearer ${token}`, "x-github-api-version": "2022-11-28" },
+      headers: githubHeaders(token),
       signal: AbortSignal.timeout(10_000),
     });
   } catch {
@@ -38,7 +51,7 @@ export async function fetchGitHubAccount(token: string): Promise<GitHubAccount> 
 /** `owner/name` of repositories the token can reach, most recently pushed first. */
 export async function fetchGitHubRepos(token: string): Promise<string[]> {
   const response = await fetch("https://api.github.com/user/repos?per_page=100&sort=pushed", {
-    headers: { accept: "application/vnd.github+json", authorization: `Bearer ${token}`, "x-github-api-version": "2022-11-28" },
+    headers: githubHeaders(token),
     signal: AbortSignal.timeout(10_000),
   }).catch(() => {
     throw new GitHubRejected("Could not reach GitHub.");

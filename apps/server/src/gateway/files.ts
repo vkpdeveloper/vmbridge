@@ -2,6 +2,7 @@ import type { Box } from "../providers/index.ts";
 import { sleep } from "../runtime.ts";
 import type { Sql } from "../sql.ts";
 import type { ProjectRow } from "../store.ts";
+import { githubHeaders } from "../github.ts";
 import { quote } from "../vm/runtime.ts";
 import { githubName, type RemoteBranches } from "./repos.ts";
 import type { Wire } from "./types.ts";
@@ -334,12 +335,7 @@ export class FileTrees {
     if (!name) throw new Error("Only GitHub repositories can be searched while their VM sleeps.");
     const token = this.githubToken();
     const response = await fetch(`https://api.github.com/repos/${name}/git/trees/${encodeURIComponent(ref)}?recursive=1`, {
-      headers: {
-        accept: "application/vnd.github+json",
-        "user-agent": "vmbridge",
-        "x-github-api-version": "2022-11-28",
-        ...(token ? { authorization: `Bearer ${token}` } : {}),
-      },
+      headers: githubHeaders(token),
       signal: AbortSignal.timeout(20_000),
     });
     if (!response.ok) {

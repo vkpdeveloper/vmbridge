@@ -1,5 +1,6 @@
 // VM Bridge's own releases on GitHub: the dashboard's update notice and `vmbridge update` both read them.
 
+import { githubHeaders } from "./github.ts";
 import type { Job } from "./jobs.ts";
 import type { Settings } from "./settings.ts";
 
@@ -13,7 +14,7 @@ type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
 /** The latest release's version, such as 1.2.0, from its tag. GitHub leaves drafts and prereleases out of "latest". */
 export async function latestVersion(fetcher: Fetcher = fetch): Promise<string> {
   const response = await fetcher(`https://api.github.com/repos/${releaseRepo}/releases/latest`, {
-    headers: { accept: "application/vnd.github+json", "user-agent": "vmbridge" },
+    headers: githubHeaders(),
     signal: AbortSignal.timeout(10_000),
   });
   if (!response.ok) throw new Error(`GitHub answered ${response.status} when asked for the latest release.`);

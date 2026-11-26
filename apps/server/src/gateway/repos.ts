@@ -1,3 +1,4 @@
+import { githubHeaders } from "../github.ts";
 import type { ProjectRow } from "../store.ts";
 import type { Wire } from "./types.ts";
 
@@ -180,7 +181,7 @@ export class RemoteBranches {
   }
 
   private async github(name: string, token: string | undefined): Promise<Branches> {
-    const headers = { accept: "application/vnd.github+json", ...(token ? { authorization: `Bearer ${token}` } : {}) };
+    const headers = githubHeaders(token);
     const get = async <T>(path: string) => {
       const response = await fetch(`https://api.github.com/repos/${name}${path}`, { headers, signal: AbortSignal.timeout(10_000) });
       if (response.status === 404) {
