@@ -65,3 +65,30 @@ test("adding the security headers keeps every cookie a response sets", () => {
   headers.append("set-cookie", "b=; Max-Age=0");
   expect(withSecurityHeaders(new Response(null, { headers })).headers.getSetCookie()).toEqual(["a=; Max-Age=0", "b=; Max-Age=0"]);
 });
+
+test("a path naming another host is not fetched from that host", async () => {
+  const other = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("other service") });
+  // Sent over a raw socket, because fetch would collapse the leading slashes.
+  const send = (path: string) =>
+    new Promise<string>((resolve) => {
+      let reply = "";
+      Bun.connect({
+        hostname: "127.0.0.1",
+        port: bridge.port,
+        socket: {
+          open: (socket) => void socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`),
+          data: (_socket, data) => void (reply += data.toString()),
+          close: () => resolve(reply),
+        },
+      });
+    });
+  try {
+    for (const path of [`//127.0.0.1:${other.port}/x`, `/\\127.0.0.1:${other.port}/x`]) {
+      const reply = await send(path);
+      expect({ path, status: reply.split("\r\n")[0] }).toEqual({ path, status: "HTTP/1.1 404 Not Found" });
+      expect(reply).not.toContain("other service");
+    }
+  } finally {
+    other.stop(true);
+  }
+});

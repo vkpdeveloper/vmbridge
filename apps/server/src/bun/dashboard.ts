@@ -36,8 +36,13 @@ export async function openDashboard(development: boolean) {
     routes: {},
     fetch: async (request: Request) => {
       const { pathname, search } = new URL(request.url);
+      // Only the path and query go onto the files server's address. Resolving the path against it instead would let
+      // a request for `//host/x` name another host, and this server would fetch it for anyone.
+      const target = new URL(files.url);
+      target.pathname = pathname;
+      target.search = search;
       const etag = request.headers.get("if-none-match");
-      const response = await fetch(new URL(`${pathname}${search}`, files.url), {
+      const response = await fetch(target, {
         method: request.method,
         headers: etag ? { "if-none-match": etag } : {},
         redirect: "manual",
