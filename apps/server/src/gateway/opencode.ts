@@ -27,7 +27,10 @@ const ticketed = [
 
 /** As `opencode pair`'s codes: one use, for ten minutes. */
 const pairingMs = 10 * 60_000;
-/** Where OpenCode's clients trade a pairing code for a password. VM Bridge answers it, under the project's address. */
+/**
+ * Where OpenCode's clients trade a pairing code for a password. VM Bridge answers it, at the root too: OpenCode's phone
+ * app takes only an address without a path, and the code says which project it is for.
+ */
 const connectPath = /^\/auth\/connect\/([^/]+)$/;
 
 /** Pairing on the VM would hand out a credential for its own server, which only VM Bridge holds. */
@@ -71,10 +74,13 @@ export function givenPassword(request: Request, url: URL): string | null {
 
 const atRoot = (path: string) => path === "/openapi.json" || path.startsWith("/api/");
 
-/** Requests for OpenCode: under a project's address, or at the root with a password, which T3's clients never send. */
+/**
+ * Requests for OpenCode: under a project's address, a pairing code at the root, or at the root with a password, which
+ * T3's clients never send.
+ */
 export function isOpenCodeRequest(request: Request) {
   const url = new URL(request.url);
-  if (url.pathname.startsWith(openCodePrefix)) return true;
+  if (url.pathname.startsWith(openCodePrefix) || connectPath.test(url.pathname)) return true;
   return atRoot(url.pathname) && givenPassword(request, url) !== null;
 }
 
@@ -185,10 +191,14 @@ export class OpenCodeGateway {
     return { code, expiresInSeconds: pairingMs / 1000 };
   }
 
-  /** Answers as OpenCode's own server does for a client that wants JSON. The client asks from any origin, as a web app. */
-  private redeem(request: Request, projectId: string, code: string, seen: Seen) {
+  /**
+   * Answers as OpenCode's own server does for a client that wants JSON. The client asks from any origin, as a web app.
+   * At a project's address the code must be that project's; at the root (`projectId` null) it names the project.
+   */
+  private redeem(request: Request, projectId: string | null, code: string, seen: Seen) {
     const pairing = this.pairings.get(code);
-    const password = pairing && pairing.projectId === projectId && pairing.expires > Date.now() ? this.store.openCodePassword(projectId) : null;
+    const valid = pairing && (projectId === null || pairing.projectId === projectId) && pairing.expires > Date.now();
+    const password = valid ? this.store.openCodePassword(pairing.projectId) : null;
     const headers = { "access-control-allow-origin": request.headers.get("origin") ?? "*", "cache-control": "no-store", vary: "Origin" };
     if (!password) {
       seen.refusal = "expired pairing code";
@@ -242,7 +252,7 @@ export class OpenCodeGateway {
       projectId = slash < 0 ? rest : rest.slice(0, slash);
       path = slash < 0 ? "/" : rest.slice(slash);
       if (!projectId) return null;
-    } else if (!atRoot(path)) return null;
+    } else if (!atRoot(path) && !connectPath.test(path)) return null;
     const query = new URLSearchParams(url.search);
     query.delete("auth_token");
     const search = query.toString();
@@ -267,7 +277,7 @@ export class OpenCodeGateway {
     // `..` in any spelling, `%2e%2e` too, or a second `//`, would leave the path VM Bridge checked.
     if (new URL(pathname, "http://vm").pathname !== pathname) return notFound();
     const code = request.method === "GET" ? connectPath.exec(pathname)?.[1] : undefined;
-    if (code && target.projectId !== null) return this.redeem(request, target.projectId, code, seen);
+    if (code) return this.redeem(request, target.projectId, code, seen);
     if (blocked(pathname)) return notFound();
 
     const upgrade = request.headers.get("upgrade")?.toLowerCase() === "websocket";

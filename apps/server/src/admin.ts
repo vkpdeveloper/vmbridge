@@ -281,9 +281,11 @@ export class Admin {
       }
       const { addresses } = await this.deps.network.info(request);
       const urls = addresses.map((address) => ({ ...address, url: `${address.url}${openCodePrefix}${id}` }));
-      // A phone cannot reach this machine's loopback address. The one most devices can reach goes first, as clients keep it.
-      const reachable = addressPreference.flatMap((kind) => (kind === "local" ? [] : urls.filter((url) => url.kind === kind)));
-      const pairing = reachable.length > 0 ? { ...this.deps.opencode.pairingCode(id), urls: reachable.map((url) => url.url) } : null;
+      // OpenCode's phone app takes only an address without a path, so the QR code carries VM Bridge's own: the code says
+      // which project, and the password it trades for routes each request after. A phone cannot reach this machine's
+      // loopback address. The one most devices can reach goes first, as clients keep it.
+      const reachable = addressPreference.flatMap((kind) => (kind === "local" ? [] : addresses.filter((address) => address.kind === kind)));
+      const pairing = reachable.length > 0 ? { ...this.deps.opencode.pairingCode(id), urls: reachable.map((address) => address.url) } : null;
       return json({ urls, password, pairing } satisfies OpenCodeConnection);
     }
     if (section === "network" && id && !action && method === "POST") {

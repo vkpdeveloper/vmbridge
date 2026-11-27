@@ -3,7 +3,7 @@ import type { Preview } from "@opencoredev/sandbox-sdk";
 import type { Box } from "../providers/index.ts";
 import type { OpenSocket } from "../runtime.ts";
 import { previewTarget } from "./backend.ts";
-import { installOpenCode, put, quote, root, runProgram, writes } from "./runtime.ts";
+import { put, quote, root, runProgram, writes } from "./runtime.ts";
 
 export const opencodePort = 4096;
 const dir = `${root}/opencode`;
@@ -11,26 +11,46 @@ const passwordPath = `${dir}/password`;
 const startPath = `${dir}/start.sh`;
 const processName = "opencode";
 
-// Its data, state and cache live apart from the OpenCode that T3 runs. Its config does not: the skills sync writes
-// OpenCode's instructions to the usual config folder, and the env file sets OPENCODE_CONFIG where a VM needs one.
-// OpenCode keeps OPENCODE_PASSWORD out of the shells its agents run.
+/**
+ * OpenCode's clients speak its 2.x API, which npm ships as @opencode/cli. npm's opencode-ai is the 1.x line, which
+ * T3's own OpenCode agent keeps using, so this one gets its own folder.
+ */
+const cliVersion = "2.4.2";
+const cliPrefix = `${dir}/cli`;
+const cli = `${cliPrefix}/bin/opencode`;
+const installCli = `${cli} --version 2>/dev/null | grep -qxF "opencode v${cliVersion}" || npm install -g --prefix ${cliPrefix} --no-audit --no-fund --loglevel=error @opencode/cli@${cliVersion} >&2`;
+
+// Its data, state and cache live apart from the OpenCode that T3 runs, and from what a 1.x server here left. Its config
+// does not: the skills sync writes OpenCode's instructions to the usual config folder, and the env file sets
+// OPENCODE_CONFIG where a VM needs one. OpenCode keeps OPENCODE_PASSWORD out of the shells its agents run.
 const startScript = `#!/bin/bash
 set -euo pipefail
 . ${root}/env
 OPENCODE_PASSWORD="$(cat ${passwordPath})"
-export OPENCODE_PASSWORD XDG_DATA_HOME=${dir}/data XDG_STATE_HOME=${dir}/state XDG_CACHE_HOME=${dir}/cache
+export OPENCODE_PASSWORD XDG_DATA_HOME=${dir}/v2/data XDG_STATE_HOME=${dir}/v2/state XDG_CACHE_HOME=${dir}/v2/cache
 cd "$1"
-exec opencode serve --hostname 0.0.0.0 --port ${opencodePort}
+exec ${cli} serve --hostname 0.0.0.0 --port ${opencodePort}
 `;
 
 /**
  * Asks the server on the VM itself, so it needs no preview: prints busy or idle, refused when it has another password,
- * down when nothing listens, or unknown when the request failed another way, such as timing out.
+ * old when it is not OpenCode 2, down when nothing listens, or unknown when a request failed another way, such as
+ * timing out.
  */
 const probeScript = `const auth="Basic "+Buffer.from("opencode:"+require("fs").readFileSync(process.argv[1],"utf8")).toString("base64");
-fetch("http://127.0.0.1:${opencodePort}/api/session/active",{headers:{authorization:auth},signal:AbortSignal.timeout(10000)})
-.then(async(r)=>r.status===401?"refused":r.ok?(Object.keys((await r.json()).data??{}).length?"busy":"idle"):"status "+r.status,(e)=>e?.cause?.code==="ECONNREFUSED"?"down":"unknown")
-.then((s)=>process.stdout.write(s))`;
+const ask=(path)=>fetch("http://127.0.0.1:${opencodePort}"+path,{headers:{authorization:auth},signal:AbortSignal.timeout(10000)});
+const json=(r)=>r.json().catch(()=>null);
+(async()=>{
+let r;
+try{r=await ask("/api/info")}catch(e){return e?.cause?.code==="ECONNREFUSED"?"down":"unknown"}
+if(r.status===401)return "refused";
+const info=await json(r);
+if(!String(info?.version).startsWith("2."))return "old";
+try{r=await ask("/api/session/active")}catch{return "unknown"}
+if(!r.ok)return "status "+r.status;
+const active=await json(r);
+return active?(Object.keys(active.data??{}).length?"busy":"idle"):"unknown";
+})().then((s)=>process.stdout.write(s))`;
 const probe = `node -e ${quote(probeScript)} ${passwordPath}`;
 
 const waitScript = `for _ in $(seq 120); do
@@ -59,7 +79,7 @@ export async function startOpenCode(box: Box, password: string, cwd: string) {
         writes({ [passwordPath]: password, [startPath]: startScript }),
         `. ${root}/env`,
         `[ -n "\${OPENCODE_API_KEY:-}" ] || { echo nokey; exit 0; }`,
-        installOpenCode,
+        installCli,
         probe,
       ].join("\n"),
       "Starting OpenCode",
@@ -68,8 +88,8 @@ export async function startOpenCode(box: Box, password: string, cwd: string) {
   ).trim();
   if (state === "nokey") throw new NoOpenCodeKey();
   if (state === "idle" || state === "busy") return;
-  // Refused: a server from before is running with another password.
-  if (state === "refused") await box.process(processName).restart();
+  // A server from before is running with another password, or is OpenCode 1. Restarted, it runs this start script.
+  if (state === "refused" || state === "old") await box.process(processName).restart();
   else {
     try {
       await box.start(`bash ${startPath} ${quote(cwd)}`, { name: processName });
@@ -90,10 +110,11 @@ async function probeState(box: Box) {
 /**
  * Whether an agent may be running in OpenCode on the VM now. Only an idle answer or nothing listening says no, so a
  * server that did not answer in time is not restarted or put to sleep under a running agent. A server with another
- * password counts as idle: VM Bridge cannot reach its agents, and the next request replaces it.
+ * password, or OpenCode 1, counts as idle: no client reaches its agents through VM Bridge, and the next request
+ * replaces it.
  */
 export async function openCodeBusy(box: Box) {
-  return !["idle", "down", "refused"].includes(await probeState(box));
+  return !["idle", "down", "refused", "old"].includes(await probeState(box));
 }
 
 /**

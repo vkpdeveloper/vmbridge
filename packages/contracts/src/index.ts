@@ -687,7 +687,10 @@ export interface CreatedPairing {
 export interface OpenCodeConnection {
   urls: Address[];
   password: string;
-  /** What OpenCode's QR codes carry: a one-use code that trades for the password at any of `urls`. Null when only this machine can reach VM Bridge. */
+  /**
+   * What OpenCode's QR codes carry: a one-use code that trades for the password at any of `urls`, VM Bridge's own
+   * addresses without the project's path. Null when only this machine can reach VM Bridge.
+   */
   pairing: { code: string; urls: string[]; expiresInSeconds: number } | null;
 }
 
