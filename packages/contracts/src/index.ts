@@ -715,10 +715,33 @@ export type OpenCodeLaunchEvent =
         /** The worktree on the VM. */
         directory: string;
         branch: string;
-        /** The branch the worktree started from, or null when it was opened again. */
+        /** The branch the worktree started from. */
         base: string | null;
+        /** The OpenCode session last prompted in it, when it was opened again and has one. */
+        sessionId: string | null;
       };
     };
+
+/** A worktree `vmbridge opencode resume` can open again, as `GET /api/vmbridge/opencode?remote=` lists them. */
+export interface OpenCodeWorktree {
+  name: string;
+  branch: string;
+  base: string | null;
+  vm: string;
+  /** Whether its VM sleeps, so opening it wakes the VM first. */
+  asleep: boolean;
+  /** The start of the last prompt in it. */
+  lastPrompt: string | null;
+  /** ISO times. */
+  createdAt: string;
+  lastUsedAt: string;
+}
+
+/** `GET /api/vmbridge/opencode?remote=`: the repository's project and its worktrees, last used first. */
+export interface OpenCodeWorktrees {
+  project: string | null;
+  worktrees: OpenCodeWorktree[];
+}
 
 export interface ApiError {
   error: string;

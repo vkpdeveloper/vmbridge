@@ -40,10 +40,16 @@ export class Clones {
     return [...this.snapshots.values()];
   }
 
+  /** The project for a remote, if there is one. */
+  find(reference: string): ProjectRow | null {
+    const url = canonical(normalizeRemote(reference));
+    return this.hub.store.projects().find((project) => canonical(project.url) === url) ?? null;
+  }
+
   /** Adds a project for a remote, or returns the existing one. */
   add(reference: string, options: { branch?: string | null; title?: string; id?: string } = {}): ProjectRow {
     const url = normalizeRemote(reference);
-    const existing = this.hub.store.projects().find((project) => canonical(project.url) === canonical(url));
+    const existing = this.find(url);
     if (existing) return existing;
     if (options.branch && (!/^[\w./-]+$/.test(options.branch) || options.branch.startsWith("-") || options.branch.includes(".."))) {
       throw new Error("That is not a valid branch name.");

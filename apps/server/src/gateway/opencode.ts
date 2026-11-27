@@ -30,6 +30,28 @@ const wakingInfo = () =>
   );
 /** Typing in a terminal counts as activity, but the VM's row is written at most this often for it. */
 const touchEveryMs = 10_000;
+/** A prompt in an OpenCode session, which makes it the one `vmbridge opencode resume` opens in its worktree. */
+const promptPath = /^\/api\/session\/([\w-]{1,128})\/(?:prompt|command|shell)$/;
+const promptShown = 120;
+
+/** The first text in a prompt's body, however OpenCode nests it, cut short. */
+export function promptText(body: unknown): string | null {
+  const queue: unknown[] = [body];
+  while (queue.length > 0) {
+    const value = queue.shift();
+    if (Array.isArray(value)) queue.push(...value);
+    else if (value && typeof value === "object") {
+      for (const [key, inner] of Object.entries(value)) {
+        if ((key === "text" || key === "command") && typeof inner === "string" && inner.trim()) {
+          const text = inner.trim().replace(/\s+/g, " ");
+          return text.length > promptShown ? `${text.slice(0, promptShown - 1)}…` : text;
+        }
+        queue.push(inner);
+      }
+    }
+  }
+  return null;
+}
 
 /** OpenCode's WebSockets that take a one-use ticket from an earlier request, as browsers cannot send a password. */
 const ticketed = [
@@ -158,6 +180,8 @@ export class OpenCodeGateway {
   private readonly ends = new Map<string, AbortController>();
   private readonly relays = new Set<{ vmId: string; end: (code: number, reason: string) => void }>();
   private readonly touched = new Map<string, number>();
+  /** When each worktree's use was last noted, by `<project>/<name>`. */
+  private readonly worktreeUses = new Map<string, number>();
   private readonly pairings = new Map<string, { projectId: string; expires: number }>();
 
   constructor(
@@ -360,9 +384,31 @@ export class OpenCodeGateway {
     }
     const { vmId, server } = found;
     seen.vmId = vmId;
+    if (target.worktree) this.noteUse(project.id, target.worktree.name, request, pathname);
     const path = folder ? this.atWorktree(target.path, request.method, folder) : target.path;
     if (upgrade) return this.socket(request, relay, vmId, server, path, seen);
     return this.forward(request, vmId, server, path, seen);
+  }
+
+  /**
+   * Notes a use of a `vmbridge opencode` worktree for `vmbridge opencode resume`: when, at most every few seconds, and
+   * the session and text of each prompt.
+   */
+  private noteUse(projectId: string, name: string, request: Request, pathname: string) {
+    const sessionId = request.method === "POST" ? promptPath.exec(pathname)?.[1] : undefined;
+    if (sessionId) {
+      void request
+        .clone()
+        .json()
+        .catch(() => null)
+        .then((body: unknown) => this.store.touchOpenCodeWorktree(projectId, name, { sessionId, text: promptText(body) }));
+      return;
+    }
+    const key = `${projectId}/${name}`;
+    const now = Date.now();
+    if (now - (this.worktreeUses.get(key) ?? 0) < touchEveryMs) return;
+    this.worktreeUses.set(key, now);
+    this.store.touchOpenCodeWorktree(projectId, name);
   }
 
   /** Wakes the project's VM, making it one if it has none, and starts OpenCode there. */

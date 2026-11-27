@@ -43,6 +43,21 @@ export interface ProjectRow {
   vms: ProjectVm[];
 }
 
+/** A worktree `vmbridge opencode` made on one of a project's VMs. Times are ms since the epoch. */
+export interface OpenCodeWorktreeRow {
+  projectId: string;
+  vmId: string;
+  name: string;
+  branch: string;
+  base: string | null;
+  /** The OpenCode session last prompted in it, to open again. */
+  sessionId: string | null;
+  /** The start of that prompt, to tell worktrees apart. */
+  lastPrompt: string | null;
+  createdAt: number;
+  lastUsedAt: number;
+}
+
 /** The VM a project's root path and new automations go to. */
 export const primaryVm = (project: ProjectRow): ProjectVm | undefined => project.vms[0];
 
@@ -311,6 +326,38 @@ export class Store {
   setCheckout(projectId: string, vmId: string, checkoutPath: string) {
     this.db.run("UPDATE project_vms SET checkout_path = ? WHERE project_id = ? AND vm_id = ?", checkoutPath, projectId, vmId);
     this.projectCache = null;
+  }
+
+  addOpenCodeWorktree(row: Pick<OpenCodeWorktreeRow, "projectId" | "vmId" | "name" | "branch" | "base">) {
+    const now = Date.now();
+    this.db.run(
+      "INSERT INTO opencode_worktrees (project_id, vm_id, name, branch, base, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      row.projectId, row.vmId, row.name, row.branch, row.base, now, now,
+    );
+  }
+
+  /** A project's OpenCode worktrees, last used first. */
+  openCodeWorktrees(projectId: string): OpenCodeWorktreeRow[] {
+    return this.db.all<OpenCodeWorktreeRow>(
+      `SELECT project_id AS projectId, vm_id AS vmId, name, branch, base, session_id AS sessionId, last_prompt AS lastPrompt,
+        created_at AS createdAt, last_used_at AS lastUsedAt
+      FROM opencode_worktrees WHERE project_id = ? ORDER BY last_used_at DESC`,
+      projectId,
+    );
+  }
+
+  /** Notes a use of a worktree, with the session it prompted in and the prompt when the use was one. */
+  touchOpenCodeWorktree(projectId: string, name: string, prompt?: { sessionId: string; text: string | null }) {
+    if (prompt) {
+      this.db.run(
+        "UPDATE opencode_worktrees SET last_used_at = ?, session_id = ?, last_prompt = COALESCE(?, last_prompt) WHERE project_id = ? AND name = ?",
+        Date.now(), prompt.sessionId, prompt.text, projectId, name,
+      );
+    } else this.db.run("UPDATE opencode_worktrees SET last_used_at = ? WHERE project_id = ? AND name = ?", Date.now(), projectId, name);
+  }
+
+  removeOpenCodeWorktree(projectId: string, name: string) {
+    this.db.run("DELETE FROM opencode_worktrees WHERE project_id = ? AND name = ?", projectId, name);
   }
 
   /** The local branches a project's checkout on a VM had when VM Bridge last read them. */

@@ -335,6 +335,23 @@ export const migrations = [
   ALTER TABLE vms ADD COLUMN opencode_password TEXT;
   ALTER TABLE projects ADD COLUMN opencode_password TEXT;
   `,
+  // The worktrees `vmbridge opencode` made and has not removed, so `vmbridge opencode resume` can list them without
+  // waking a VM (see gateway/opencode-launch.ts). The gateway notes each one's last use and OpenCode session.
+  `
+  CREATE TABLE opencode_worktrees (
+    project_id TEXT NOT NULL,
+    vm_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    base TEXT,
+    session_id TEXT,
+    last_prompt TEXT,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, name),
+    FOREIGN KEY (project_id, vm_id) REFERENCES project_vms(project_id, vm_id) ON DELETE CASCADE
+  );
+  `,
 ];
 
 /**

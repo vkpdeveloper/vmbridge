@@ -13,6 +13,7 @@ const ready: Ready = {
   directory: "/workspace/fikrabot/.worktrees/ab12",
   branch: "opencode/ab12",
   base: "main",
+  sessionId: null,
 };
 
 /** A cold launch as the server sends it, at the times it took. */

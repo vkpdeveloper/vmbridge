@@ -80,7 +80,7 @@ const tones = {
 } as const;
 
 export type Tone = keyof typeof tones;
-type Segment = [tone: Tone, text: string];
+export type Segment = [tone: Tone, text: string];
 
 /** Paints text for a terminal of this colour depth (as `getColorDepth` answers): 24 bits, a few colours, or none. */
 export function painter(depth: number) {
@@ -93,10 +93,10 @@ export function painter(depth: number) {
   };
 }
 
-type Paint = ReturnType<typeof painter>;
+export type Paint = ReturnType<typeof painter>;
 
 /** Joins segments into one line no wider than `width`, cutting the text, never the colours, with an ellipsis. */
-function line(segments: Segment[], width: number, paint: Paint) {
+export function line(segments: Segment[], width: number, paint: Paint) {
   let room = width;
   let out = "";
   for (const [tone, text] of segments) {

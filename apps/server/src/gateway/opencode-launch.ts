@@ -1,5 +1,5 @@
 // `vmbridge opencode`: from a local repository to OpenCode running in a fresh worktree on one of its project's VMs.
-import type { OpenCodeLaunchEvent } from "@vmbridge/contracts";
+import type { OpenCodeLaunchEvent, OpenCodeWorktrees } from "@vmbridge/contracts";
 import { newToken } from "../auth/tokens.ts";
 import { message } from "../fleet.ts";
 import type { Store } from "../store.ts";
@@ -15,11 +15,12 @@ const branchName = (branch: string) => /^[\w./-]+$/.test(branch) && !branch.star
 type Deps = { store: Store; hub: Hub; clones: Clones; traffic: Traffic; hasKey: () => boolean };
 
 /**
- * `/api/vmbridge/opencode`. POST starts OpenCode in a new worktree (see `launch`). DELETE, sent when the terminal app
- * closes, removes that worktree unless it holds work.
+ * `/api/vmbridge/opencode`. POST starts OpenCode in a new worktree, or one made before (see `launch`). DELETE, sent when
+ * the terminal app closes, removes that worktree unless it holds work. GET lists a repository's worktrees.
  */
 export function openCodeLauncher(deps: Deps) {
   return async (request: Request): Promise<Response> => {
+    if (request.method === "GET") return list(deps, request);
     if (request.method === "POST") return launch(deps, request);
     if (request.method === "DELETE") return finish(deps, request);
     return new Response("Method Not Allowed", { status: 405 });
@@ -60,11 +61,20 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
           store.setOpenCodePassword(project.id, password);
         }
         let worktree: { name: string; path: string; branch: string; base: string | null };
+        let sessionId: string | null = null;
         if (resume) {
-          step(`Finding the worktree ${resume}`);
-          const found = await hub.fleet.findWorktree(project.id, resume, step, detail);
+          // Where VM Bridge noted it, so only that VM wakes. Worktrees from before it noted them are looked for.
+          const noted = store.openCodeWorktrees(project.id).find((row) => row.name === resume);
+          step(`Opening ${noted?.branch ?? resume}`);
+          const found = await hub.fleet.findWorktree(project.id, resume, step, detail, noted?.vmId).catch((error: unknown) => {
+            if (noted) store.removeOpenCodeWorktree(project.id, resume);
+            throw error;
+          });
           vmId = found.vmId;
-          worktree = { ...found, name: resume, base: null };
+          worktree = { ...found, name: resume, base: noted?.base ?? null };
+          sessionId = noted?.sessionId ?? null;
+          if (noted) store.touchOpenCodeWorktree(project.id, resume);
+          else store.addOpenCodeWorktree({ projectId: project.id, vmId, name: resume, branch: found.branch, base: null });
         } else {
           step(`Finding a VM for ${project.title}`);
           const placement = await hub.placeOpenCode(project.id, step, detail);
@@ -72,6 +82,7 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
           if (placement.notice) send({ notice: placement.notice });
           step("Making a worktree");
           worktree = await hub.fleet.worktree(vmId, project.id, branch);
+          store.addOpenCodeWorktree({ projectId: project.id, vmId, ...worktree });
         }
         step("Starting OpenCode");
         await hub.fleet.opencode(vmId, detail);
@@ -88,6 +99,7 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
             directory: worktree.path,
             branch: worktree.branch,
             base: worktree.base,
+            sessionId,
           },
         });
       } catch (error) {
@@ -109,10 +121,40 @@ async function finish({ store, hub, traffic }: Deps, request: Request) {
   }
   try {
     const removed = await hub.fleet.removeWorktree(vmId, projectId, name);
+    if (removed) store.removeOpenCodeWorktree(projectId, name);
+    else store.touchOpenCodeWorktree(projectId, name);
     traffic.record({ kind: "system", operation: `OpenCode worktree ${name} ${removed ? "removed" : "kept"}`, vmId, status: "ok" });
     return Response.json({ removed });
   } catch (error) {
     traffic.record({ kind: "system", operation: `Removing OpenCode worktree ${name}: ${message(error)}`, vmId, status: "error" });
     return Response.json({ removed: false });
   }
+}
+
+/** The worktrees of the repository at `?remote=` that are still on its VMs, from what VM Bridge noted, waking none. */
+function list({ store, clones }: Deps, request: Request) {
+  const remote = new URL(request.url).searchParams.get("remote") ?? "";
+  let project: ReturnType<Clones["find"]> = null;
+  try {
+    project = clones.find(remote);
+  } catch {
+    // Not a remote VM Bridge can clone, so it has no project.
+  }
+  const answer: OpenCodeWorktrees = {
+    project: project?.title ?? null,
+    worktrees: (project ? store.openCodeWorktrees(project.id) : []).map((row) => {
+      const vm = store.vm(row.vmId);
+      return {
+        name: row.name,
+        branch: row.branch,
+        base: row.base,
+        vm: vm?.name ?? row.vmId,
+        asleep: vm?.state !== "ready" && vm?.state !== "busy",
+        lastPrompt: row.lastPrompt,
+        createdAt: new Date(row.createdAt).toISOString(),
+        lastUsedAt: new Date(row.lastUsedAt).toISOString(),
+      };
+    }),
+  };
+  return Response.json(answer);
 }

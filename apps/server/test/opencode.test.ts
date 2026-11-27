@@ -3,7 +3,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { openDatabase } from "../src/bun/sqlite.ts";
 import { openSocket } from "../src/bun/socket.ts";
 import type { Fleet } from "../src/fleet.ts";
-import { isOpenCodeRequest, OpenCodeGateway } from "../src/gateway/opencode.ts";
+import { isOpenCodeRequest, OpenCodeGateway, promptText } from "../src/gateway/opencode.ts";
 import { Store } from "../src/store.ts";
 import { Traffic } from "../src/traffic.ts";
 import { OpenCodeServer } from "../src/vm/opencode.ts";
@@ -210,6 +210,29 @@ describe("OpenCode gateway", () => {
     expect(asked[1]!.path).toStartWith("/api/fs/list?location%5Bdirectory%5D=%2FUsers%2Fme");
   });
 
+  test("a prompt in a worktree makes its session the one to open again, and uses come first in the list", async () => {
+    const { gateway, store } = setup();
+    store.setCheckout("p1", "vm1", "/workspace/app");
+    store.addOpenCodeWorktree({ projectId: "p1", vmId: "vm1", name: "ab12cd34", branch: "opencode/ab12cd34", base: "main" });
+    await Bun.sleep(2);
+    store.addOpenCodeWorktree({ projectId: "p1", vmId: "vm1", name: "ef56ab78", branch: "opencode/ef56ab78", base: "main" });
+    expect(store.openCodeWorktrees("p1").map((row) => row.name)).toEqual(["ef56ab78", "ab12cd34"]);
+
+    await Bun.sleep(2);
+    const prompt = { parts: [{ type: "text", text: "  Fix the login\n redirect  " }] };
+    const response = await send(gateway, "/opencode/p1/w/vm1/ab12cd34/api/session/ses_1/prompt", {
+      method: "POST",
+      headers: { authorization: basic(projectPassword), "content-type": "application/json" },
+      body: JSON.stringify(prompt),
+    });
+    expect(response.status).toBe(200);
+    // The body still reaches the VM whole.
+    expect(asked[0]!.path).toStartWith("/api/session/ses_1/prompt");
+    await Bun.sleep(5);
+    const [first] = store.openCodeWorktrees("p1");
+    expect(first).toMatchObject({ name: "ab12cd34", sessionId: "ses_1", lastPrompt: "Fix the login redirect" });
+  });
+
   test("a worktree address names only the project's own VMs and plain worktree names", async () => {
     const { gateway, store } = setup();
     store.setCheckout("p1", "vm1", "/workspace/app");
@@ -247,4 +270,11 @@ describe("OpenCode gateway", () => {
     expect(calls.forgot).toBe(1);
     await expectNoSecrets(response);
   });
+});
+
+test("a prompt's text is found however OpenCode nests it, and cut short", () => {
+  expect(promptText({ parts: [{ type: "file", url: "x" }, { type: "text", text: "hello" }] })).toBe("hello");
+  expect(promptText({ command: "review", arguments: "" })).toBe("review");
+  expect(promptText({ parts: [] })).toBeNull();
+  expect(promptText({ text: "a".repeat(300) })!.length).toBe(120);
 });

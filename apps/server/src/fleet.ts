@@ -967,7 +967,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
   private async setUp(vmId: string, projectId: string, progress: (detail: string) => void, detail?: (text: string) => void) {
     const project = this.project(projectId);
     const vm = this.store.vm(vmId);
-    if (!this.backend(vmId)) progress(`${vm?.state === "sleeping" ? "Waking" : "Starting"} ${vm ? `${vm.name} on ${providers[vm.provider].label}` : "the VM"}`);
+    if (!this.backend(vmId)) progress(this.wakeStep(vmId));
     const backend = await this.ensureTelling(vmId, detail);
     if (project.vms.find((entry) => entry.vmId === vmId)?.checkoutPath) return;
     const release = this.lease(vmId);
@@ -1017,25 +1017,32 @@ printf '%s' "$base"`,
     }
   }
 
+  /** The step a wake shows, such as "Waking vm-3f2a1c on Daytona". */
+  private wakeStep(vmId: string) {
+    const vm = this.store.vm(vmId);
+    return `${vm?.state === "sleeping" ? "Waking" : "Starting"} ${vm ? `${vm.name} on ${providers[vm.provider].label}` : "the VM"}`;
+  }
+
   /**
-   * Finds a worktree `worktree` made, to open it again. Its name does not say which of the project's VMs holds it, so
-   * this looks on the awake ones first, then wakes the others in turn. Answers its VM and branch.
+   * Finds a worktree `worktree` made, to open it again, on `vmId` when VM Bridge noted where it is. Otherwise it looks
+   * on the project's awake VMs first, then wakes the others in turn. Answers its VM and branch.
    */
   async findWorktree(
     projectId: string,
     name: string,
     progress: (detail: string) => void,
     detail?: (text: string) => void,
+    vmId?: string,
   ): Promise<{ vmId: string; path: string; branch: string }> {
     const project = this.project(projectId);
     const entries = project.vms.filter((entry) => {
       const state = this.store.vm(entry.vmId)?.state;
-      return entry.checkoutPath && state !== "gone" && state !== "error";
+      return entry.checkoutPath && state !== "gone" && state !== "error" && (!vmId || entry.vmId === vmId);
     });
     const awake = entries.filter((entry) => this.backend(entry.vmId));
     const asleep = entries.filter((entry) => !this.backend(entry.vmId));
     for (const entry of worktreeName.test(name) ? [...awake, ...asleep] : []) {
-      if (!this.backend(entry.vmId)) progress(`Waking ${this.store.vm(entry.vmId)?.name ?? entry.vmId} to look for it`);
+      if (!this.backend(entry.vmId)) progress(vmId ? this.wakeStep(entry.vmId) : `Waking ${this.store.vm(entry.vmId)?.name ?? entry.vmId} to look for it`);
       await this.ensureTelling(entry.vmId, detail);
       const box = this.boxes.get(entry.vmId);
       if (!box) continue;
