@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { CommandLineIcon } from "@hugeicons/core-free-icons";
 import type { OpenCodeConnection, ProjectInfo } from "@vmbridge/contracts";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -6,6 +7,9 @@ import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemTitle }
 import { useAction } from "@/hooks/use-action";
 import { api } from "./api.ts";
 import { CopyButton } from "./CopyButton.tsx";
+
+/** The terminal command that connects to an address. OpenCode refuses a password in the URL and reads it from OPENCODE_PASSWORD. */
+const connectCommand = (url: string, password: string) => `OPENCODE_PASSWORD='${password}' opencode --server ${url}`;
 
 /** A project's OpenCode address and password, fetched as the dialog opens. The first open makes the password. */
 export function ConnectOpenCode({ project }: { project: ProjectInfo }) {
@@ -23,7 +27,7 @@ export function ConnectOpenCode({ project }: { project: ProjectInfo }) {
         <DialogHeader>
           <DialogTitle>Connect OpenCode</DialogTitle>
           <DialogDescription>
-            In OpenCode, connect to a server with this address and password. {project.title}'s VM wakes on the first request.
+            In OpenCode, connect to a server with this address and password, or copy the terminal command. {project.title}'s VM wakes on the first request.
           </DialogDescription>
         </DialogHeader>
         {connection && (
@@ -35,6 +39,7 @@ export function ConnectOpenCode({ project }: { project: ProjectInfo }) {
                   <ItemDescription className="truncate font-mono text-xs">{url.url}</ItemDescription>
                 </ItemContent>
                 <ItemActions>
+                  <CopyButton value={connectCommand(url.url, connection.password)} label="Copy command" icon={CommandLineIcon} />
                   <CopyButton value={url.url} label="Copy address" />
                 </ItemActions>
               </Item>

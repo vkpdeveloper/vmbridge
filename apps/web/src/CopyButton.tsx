@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { copyText } from "@/lib/clipboard";
 
-export function CopyButton({ value, label = "Copy" }: { value: string; label?: string }) {
+export function CopyButton({ value, label = "Copy", icon = Copy01Icon }: { value: string; label?: string; icon?: typeof Copy01Icon }) {
   const [hovered, setHovered] = useState(false);
   const [result, setResult] = useState<"Copied" | "Copy failed" | null>(null);
   return (
@@ -23,7 +23,7 @@ export function CopyButton({ value, label = "Copy" }: { value: string; label?: s
           }}
         >
           <HugeiconsIcon
-            icon={result === "Copied" ? Tick02Icon : Copy01Icon}
+            icon={result === "Copied" ? Tick02Icon : icon}
             strokeWidth={1.75}
             className={result === "Copied" ? "text-success" : undefined}
           />
