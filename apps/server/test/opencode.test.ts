@@ -39,17 +39,18 @@ function setup({ awake = true, wakeMs = 0, wakeWaitMs = 1_000, port = vm.port } 
   store.addProjectVm("p1", "vm1");
   store.setOpenCodePassword("p1", projectPassword);
   store.setOpenCodePassword("p2", "other-pass");
-  const calls = { place: [] as string[], ensure: 0, forgot: 0 };
+  const calls = { place: [] as string[], wake: 0, forgot: 0 };
   let up = awake;
   const server = new OpenCodeServer("vm1", preview(port ?? 0), vmPassword, openSocket);
   const fleet = Object.assign(new EventEmitter(), {
-    backend: () => (up ? {} : undefined),
+    machineReady: () => up,
     place: async (projectId: string) => {
       calls.place.push(projectId);
       return "vm1";
     },
-    ensure: async () => {
-      calls.ensure++;
+    // OpenCode waits only for the VM to be prepared, never for T3.
+    machine: async () => {
+      calls.wake++;
       await Bun.sleep(wakeMs);
       up = true;
     },
@@ -167,7 +168,7 @@ describe("OpenCode gateway", () => {
     const { gateway, calls } = setup({ awake: false, wakeMs: 100 });
     const response = await send(gateway, "/opencode/p1/api/session", { headers: { authorization: basic(projectPassword) } });
     expect(response.status).toBe(200);
-    expect(calls.ensure).toBe(1);
+    expect(calls.wake).toBe(1);
   });
 
   test("a request that waited while the password changed is refused, as the change ended only open connections", async () => {
@@ -196,7 +197,7 @@ describe("OpenCode gateway", () => {
     expect(((await response.json()) as { version: string }).version).toStartWith("2.");
     expect(asked).toEqual([]);
     // The wake goes on.
-    expect(calls.ensure).toBe(1);
+    expect(calls.wake).toBe(1);
   });
 
   test("a worktree address goes to its VM, and OpenCode's question for the server's folder gets the worktree", async () => {
@@ -248,7 +249,7 @@ describe("OpenCode gateway", () => {
     expect(response.status).toBe(503);
     expect(response.headers.get("retry-after")).toBe("10");
     expect(calls.place).toEqual([]);
-    expect(calls.ensure).toBe(0);
+    expect(calls.wake).toBe(0);
   });
 
   test("a VM that does not answer gets a fixed error naming nothing of the VM", async () => {

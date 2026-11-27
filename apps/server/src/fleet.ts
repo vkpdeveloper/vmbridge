@@ -113,7 +113,16 @@ export interface ThreadPlacement {
 export class Fleet extends EventEmitter<FleetEvents> {
   private readonly backends = new Map<string, Backend>();
   private readonly boxes = new Map<string, Box>();
+  /**
+   * VMs running and prepared (sign-ins, tools and skills in place), whether or not T3 answers yet. OpenCode needs only
+   * this, so it never waits for T3 (see `machine`).
+   */
+  private readonly prepared = new Set<string>();
   private readonly connecting = new Map<string, Promise<Backend>>();
+  /** Each running wake's point where the VM is prepared, before T3 starts. */
+  private readonly preparing = new Map<string, PromiseWithResolvers<Box>>();
+  /** T3 knowing each project on each VM, by `vmId:projectId`, checked once while VM Bridge runs (see `registered`). */
+  private readonly registrations = new Map<string, Promise<void>>();
   /** OpenCode on awake VMs, from its first use until the VM goes offline. */
   private readonly opencodes = new Map<string, Promise<OpenCodeServer>>();
   private readonly placing = new Map<string, Promise<string>>();
@@ -366,10 +375,49 @@ export class Fleet extends EventEmitter<FleetEvents> {
     if (ready) return Promise.resolve(ready);
     let flight = this.connecting.get(vmId);
     if (!flight) {
-      flight = this.exclusive(vmId, () => this.open(vmId)).finally(() => this.connecting.delete(vmId));
+      const prepared = Promise.withResolvers<Box>();
+      prepared.promise.catch(() => {});
+      this.preparing.set(vmId, prepared);
+      flight = this.exclusive(vmId, () => this.open(vmId, prepared.resolve)).finally(() => {
+        this.connecting.delete(vmId);
+        if (this.preparing.get(vmId) === prepared) this.preparing.delete(vmId);
+      });
+      // Once prepared, this settles nothing: a T3 failure after that is the wake's to report.
+      flight.catch(prepared.reject);
       this.connecting.set(vmId, flight);
     }
     return flight;
+  }
+
+  /**
+   * The VM running and prepared, for OpenCode: it does not wait for T3, which the wake goes on starting meanwhile. What
+   * the wake does until then goes to `detail`, and nothing after, so T3's steps never show.
+   */
+  async machine(vmId: string, detail?: (text: string) => void): Promise<Box> {
+    const ready = this.prepared.has(vmId) && this.boxes.get(vmId);
+    if (ready) return ready;
+    // The wake goes straight on to T3 once prepared, before this stops listening, so nothing after that is passed on.
+    const forward = (id: string, text: string) => {
+      if (id === vmId && !this.prepared.has(vmId)) detail?.(text);
+    };
+    this.on("wakeDetail", forward);
+    try {
+      const wake = this.ensure(vmId);
+      wake.catch(() => {});
+      const preparing = this.preparing.get(vmId);
+      if (preparing) return await preparing.promise;
+      await wake;
+      const box = this.boxes.get(vmId);
+      if (!box) throw new Error(`VM ${vmId} is not awake.`);
+      return box;
+    } finally {
+      this.off("wakeDetail", forward);
+    }
+  }
+
+  /** Whether OpenCode can use the VM now, without waking it. */
+  machineReady(vmId: string) {
+    return this.prepared.has(vmId) && this.boxes.has(vmId);
   }
 
   /** `ensure`, passing on what the wake is doing to `detail` while it runs, even when another caller started it. */
@@ -386,10 +434,14 @@ export class Fleet extends EventEmitter<FleetEvents> {
     }
   }
 
-  private async open(vmId: string): Promise<Backend> {
+  private async open(vmId: string, prepared: (box: Box) => void = () => {}): Promise<Backend> {
     if (this.closed) throw new Error("VM Bridge is stopping.");
     const ready = this.backend(vmId);
-    if (ready) return ready;
+    if (ready) {
+      const box = this.boxes.get(vmId);
+      if (box) prepared(box);
+      return ready;
+    }
     const vm = this.store.vm(vmId);
     if (!vm) throw new Error(`VM ${vmId} does not exist.`);
     if (vm.state === "gone") throw new Error("This VM was removed from the provider. Start a new thread to get a new VM.");
@@ -441,7 +493,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
         if (wasAsleep || !vm.t3Token) return true;
         const shell = await new Backend(vmId, preview, vm.t3Token, this.openSocket).json<Shell>("/api/orchestration/shell").catch(() => null);
         return Boolean(shell && !hasLiveWork(shell)) && !(await openCodeBusy(woken).catch(() => true));
-      }, watch);
+      }, watch, prepared);
       watch.done();
       this.touch(vmId);
       const durationMs = Math.round(performance.now() - started);
@@ -451,10 +503,14 @@ export class Fleet extends EventEmitter<FleetEvents> {
       return backend;
     } catch (error) {
       this.failed("wake VM", error, { vmId, provider: vm.provider });
+      // T3 failed after OpenCode started using the VM: it stays up for OpenCode, and the idle sweep puts it to sleep once
+      // it has been idle as long as any failed VM.
+      const usedByOpenCode = this.prepared.has(vmId) && (this.leased(vmId) || this.opencodes.has(vmId));
+      if (!usedByOpenCode) this.prepared.delete(vmId);
       if (error instanceof SandboxError && error.code === "not_found") this.markGone(vmId);
       else {
         // Woken but unusable: put it back to sleep so it does not run, and bill, outside the idle sweep.
-        if (box && wasAsleep) await this.sleepBox(vmId, this.driver(vm.provider), box).catch((sleepError) => this.failed("sleep VM", sleepError, { vmId, provider: vm.provider }));
+        if (box && wasAsleep && !usedByOpenCode) await this.sleepBox(vmId, this.driver(vm.provider), box).catch((sleepError) => this.failed("sleep VM", sleepError, { vmId, provider: vm.provider }));
         this.setState(vmId, "error", message(error));
       }
       this.emit("wakeFailed", vmId, message(error));
@@ -472,6 +528,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
     version: string,
     idle: (preview: Preview) => Promise<boolean>,
     watch = stopwatch("connect", vm.id),
+    prepared: (box: Box) => void = () => {},
   ): Promise<Backend> {
     // Codex on this VM may have refreshed its own tokens while VM Bridge could not reach it. Refreshing here with the
     // refresh token that retired would fail, so take the VM's first. Otherwise `prepareVm` keeps the newer file.
@@ -483,17 +540,17 @@ export class Fleet extends EventEmitter<FleetEvents> {
     const credentials = await this.credentials(vm.provider);
     const fingerprint = credentialsFingerprint(credentials, this.store.encryption);
     this.emit("wakeDetail", vm.id, "Preparing the VM");
-    const [prepared, preview] = await Promise.all([prepareVm(box, version, credentials, fingerprint), box.preview(t3Port)]);
+    const [setup, preview] = await Promise.all([prepareVm(box, version, credentials, fingerprint), box.preview(t3Port)]);
     watch.lap("prepare VM, preview URL");
-    if (prepared.codexAuth) {
-      await this.agents.adoptCodex(prepared.codexAuth, vm.id);
+    if (setup.codexAuth) {
+      await this.agents.adoptCodex(setup.codexAuth, vm.id);
       // A file VM Bridge did not adopt, such as another account's, is replaced after all.
       const ours = (await this.credentials(vm.provider)).codexAuthJson;
-      if (ours && ours !== prepared.codexAuth) await writeCodexAuth(box, ours);
+      if (ours && ours !== setup.codexAuth) await writeCodexAuth(box, ours);
       watch.lap("adopt Codex sign-in");
     }
     // Before T3 starts or VM Bridge sends it anything, so no agent on a woken VM runs with old skills.
-    if (await this.syncSkills(vm.id, box, prepared.skillsManifest)) watch.lap("sync skills");
+    if (await this.syncSkills(vm.id, box, setup.skillsManifest)) watch.lap("sync skills");
     let restart = vm.t3Credentials !== fingerprint && (await idle(preview));
     // OpenCode reads the env file only as it starts. The next request for it starts it again. One that cannot be stopped
     // would keep the old sign-ins, so T3 keeps them too: the VM still counts as behind, and a later sweep tries again.
@@ -507,8 +564,11 @@ export class Fleet extends EventEmitter<FleetEvents> {
         },
       );
     }
+    // Ready for OpenCode, which starts while T3 does. After stopping OpenCode above, so that never stops one started now.
+    this.prepared.add(vm.id);
+    prepared(box);
     this.emit("wakeDetail", vm.id, "Starting T3");
-    let server = await startT3(box, vm.t3Token, restart, prepared.t3);
+    let server = await startT3(box, vm.t3Token, restart, setup.t3);
     watch.lap("start T3, session");
     if (server.descriptor.orchestrationProtocolVersion !== 2) {
       throw new Error(`T3 ${version} speaks orchestration protocol ${server.descriptor.orchestrationProtocolVersion}. VM Bridge supports 2.`);
@@ -655,6 +715,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
 
   private async sleepBox(vmId: string, driver: Driver, box: Box) {
     this.boxes.delete(vmId);
+    this.prepared.delete(vmId);
     const { checkpoint } = await driver.sleep(box);
     this.store.updateVm(vmId, { checkpoint: checkpoint ?? null, lastSleptAt: Date.now() });
   }
@@ -694,6 +755,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
   }
 
   private markGone(vmId: string) {
+    this.prepared.delete(vmId);
     this.store.updateVm(vmId, { state: "gone", error: "The provider no longer has this VM." });
     this.store.removeVmFromProjects(vmId);
     this.emit("offline", vmId);
@@ -747,7 +809,8 @@ export class Fleet extends EventEmitter<FleetEvents> {
     if (cached && this.opencodes.get(vmId) === cached) this.opencodes.delete(vmId);
     let flight = this.opencodes.get(vmId);
     if (!flight) {
-      flight = this.exclusive(vmId, () => this.startOpenCode(vmId, detail));
+      // Not under the VM's lock, which a wake holds until T3 answers. The lease keeps the VM from sleeping or restarting.
+      flight = this.exclusive(`opencode:${vmId}`, () => this.startOpenCode(vmId, detail));
       this.opencodes.set(vmId, flight);
       const started = flight;
       started.catch(() => {
@@ -766,8 +829,9 @@ export class Fleet extends EventEmitter<FleetEvents> {
 
   private async startOpenCode(vmId: string, detail: (text: string) => void): Promise<OpenCodeServer> {
     const vm = this.store.vm(vmId);
-    const box = this.box(vmId);
+    const box = this.machineReady(vmId) ? this.boxes.get(vmId) : undefined;
     if (!vm || !box) throw new Error(`VM ${vmId} is not awake.`);
+    const release = this.lease(vmId);
     // It starts in the checkout this VM holds. Clients can work in any folder on the VM, such as a worktree.
     const checkout = this.store.projects().flatMap((project) => project.vms).find((entry) => entry.vmId === vmId)?.checkoutPath ?? checkoutRoot;
     const password = vm.opencodePassword ?? newToken();
@@ -782,6 +846,8 @@ export class Fleet extends EventEmitter<FleetEvents> {
     } catch (error) {
       if (!(error instanceof NoOpenCodeKey)) this.traffic.record({ kind: "provider", operation: "start OpenCode", vmId, status: "error", reason: message(error) });
       throw error;
+    } finally {
+      release();
     }
   }
 
@@ -809,6 +875,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
       this.backends.get(vmId)?.close();
       this.backends.delete(vmId);
       this.boxes.delete(vmId);
+      this.prepared.delete(vmId);
       if (vm.sandboxId && vm.state !== "gone") await this.driver(vm.provider).destroy(vm.sandboxId);
       // A VM asleep as a checkpoint has no sandbox left, only the checkpoint.
       if (vm.checkpoint) await this.driver(vm.provider).deleteCheckpoint(vm.checkpoint);
@@ -851,13 +918,14 @@ export class Fleet extends EventEmitter<FleetEvents> {
    * The project's primary VM, creating, cloning and registering it as needed.
    * A VM without a project (such as the first one, started to read T3's configuration) is reused.
    */
-  place(projectId: string, progress: (detail: string) => void = () => {}): Promise<string> {
-    let flight = this.placing.get(projectId);
+  place(projectId: string, progress: (detail: string) => void = () => {}, forOpenCode = false): Promise<string> {
+    const key = forOpenCode ? `opencode:${projectId}` : projectId;
+    let flight = this.placing.get(key);
     if (!flight) {
-      flight = this.exclusive(`project:${projectId}`, () => this.placePrimary(projectId, progress)).finally(() =>
-        this.placing.delete(projectId),
+      flight = this.exclusive(`project:${projectId}`, () => this.placePrimary(projectId, progress, undefined, forOpenCode)).finally(() =>
+        this.placing.delete(key),
       );
-      this.placing.set(projectId, flight);
+      this.placing.set(key, flight);
     }
     return flight;
   }
@@ -878,11 +946,13 @@ export class Fleet extends EventEmitter<FleetEvents> {
       progress: (detail: string) => void;
       /** What the current step is doing now, while a VM wakes. */
       detail?: (text: string) => void;
+      /** For OpenCode, which needs the VM prepared but not T3, so placement does not wait for T3 (see `machine`). */
+      forOpenCode?: boolean;
     },
   ): Promise<ThreadPlacement> {
-    const { only, load, placed, progress, detail } = options;
+    const { only, load, placed, progress, detail, forOpenCode = false } = options;
     return this.exclusive(`project:${projectId}`, async () => {
-      const primary = await this.placePrimary(projectId, progress, detail);
+      const primary = await this.placePrimary(projectId, progress, detail, forOpenCode);
       // VMs that failed to wake or set up during this placement.
       const failed = new Set<string>();
       for (;;) {
@@ -903,7 +973,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
           let vmId: string | undefined;
           try {
             vmId = await this.addVm(project, progress, { ...target, discardOnError: true });
-            await this.setUp(vmId, projectId, progress, detail);
+            await this.setUp(vmId, projectId, progress, detail, forOpenCode);
             this.overflowFailedAt.delete(projectId);
             placed(vmId);
             return { vmId, notice: null };
@@ -915,9 +985,10 @@ export class Fleet extends EventEmitter<FleetEvents> {
           }
         }
         const { vmId } = choice.load;
-        if (!choice.load.awake || !project.vms.find((entry) => entry.vmId === vmId)?.checkoutPath) {
+        const ready = forOpenCode ? this.machineReady(vmId) : choice.load.awake;
+        if (!ready || !project.vms.find((entry) => entry.vmId === vmId)?.checkoutPath) {
           try {
-            await this.setUp(vmId, projectId, progress, detail);
+            await this.setUp(vmId, projectId, progress, detail, forOpenCode);
           } catch (error) {
             // Nothing to fall back to from the primary: fail the launch as before. A spent budget refuses every wake.
             if (vmId === primary || error instanceof BudgetReached) throw error;
@@ -937,12 +1008,12 @@ export class Fleet extends EventEmitter<FleetEvents> {
     return project;
   }
 
-  private async placePrimary(projectId: string, progress: (detail: string) => void, detail?: (text: string) => void): Promise<string> {
+  private async placePrimary(projectId: string, progress: (detail: string) => void, detail?: (text: string) => void, forOpenCode = false): Promise<string> {
     const project = this.project(projectId);
     const primary = primaryVm(project);
     if (primary?.checkoutPath) return primary.vmId;
     const vmId = primary?.vmId ?? (await this.addVm(project, progress, this.placement(project.url)));
-    await this.setUp(vmId, projectId, progress, detail);
+    await this.setUp(vmId, projectId, progress, detail, forOpenCode);
     return vmId;
   }
 
@@ -963,24 +1034,55 @@ export class Fleet extends EventEmitter<FleetEvents> {
     return vmId;
   }
 
-  /** Wakes one of a project's VMs and makes sure it holds the checkout and T3 knows the project. */
-  private async setUp(vmId: string, projectId: string, progress: (detail: string) => void, detail?: (text: string) => void) {
+  /**
+   * Wakes one of a project's VMs and makes sure it holds the checkout and T3 knows the project. For OpenCode it waits
+   * only until the VM is prepared, and T3 learns of a new checkout once it answers.
+   */
+  private async setUp(vmId: string, projectId: string, progress: (detail: string) => void, detail?: (text: string) => void, forOpenCode = false) {
     const project = this.project(projectId);
-    const vm = this.store.vm(vmId);
-    if (!this.backend(vmId)) progress(this.wakeStep(vmId));
-    const backend = await this.ensureTelling(vmId, detail);
-    if (project.vms.find((entry) => entry.vmId === vmId)?.checkoutPath) return;
+    let backend: Backend | undefined;
+    if (forOpenCode) {
+      if (!this.machineReady(vmId)) progress(this.wakeStep(vmId));
+      await this.machine(vmId, detail);
+    } else {
+      if (!this.backend(vmId)) progress(this.wakeStep(vmId));
+      backend = await this.ensureTelling(vmId, detail);
+    }
+    const existing = project.vms.find((entry) => entry.vmId === vmId)?.checkoutPath;
+    if (existing) {
+      // Cloned for OpenCode before T3 answered, then VM Bridge restarted before telling T3: tell it now.
+      if (backend) await this.registered(vmId, project, existing, backend);
+      return;
+    }
     const release = this.lease(vmId);
     try {
       progress("Cloning the repository");
       const checkoutPath = await this.clone(vmId, project);
-      progress("Registering the project with T3");
-      await this.register(backend, project, checkoutPath);
+      if (backend) {
+        progress("Registering the project with T3");
+        await this.registered(vmId, project, checkoutPath, backend);
+      } else {
+        void this.ensure(vmId)
+          .then((started) => this.registered(vmId, project, checkoutPath, started))
+          .catch((error: unknown) => this.failed("register project", error, { vmId, provider: this.store.vm(vmId)?.provider }));
+      }
       this.store.setCheckout(projectId, vmId, checkoutPath);
       this.emit("changed");
     } finally {
       release();
     }
+  }
+
+  /** `register`, once per VM and project while VM Bridge runs, shared by everyone asking at once. */
+  private registered(vmId: string, project: ProjectRow, checkoutPath: string, backend: Backend): Promise<void> {
+    const key = `${vmId}:${project.id}`;
+    let done = this.registrations.get(key);
+    if (!done) {
+      done = this.register(backend, project, checkoutPath);
+      done.catch(() => this.registrations.delete(key));
+      this.registrations.set(key, done);
+    }
+    return done;
   }
 
   /**
@@ -1039,13 +1141,11 @@ printf '%s' "$base"`,
       const state = this.store.vm(entry.vmId)?.state;
       return entry.checkoutPath && state !== "gone" && state !== "error" && (!vmId || entry.vmId === vmId);
     });
-    const awake = entries.filter((entry) => this.backend(entry.vmId));
-    const asleep = entries.filter((entry) => !this.backend(entry.vmId));
+    const awake = entries.filter((entry) => this.machineReady(entry.vmId));
+    const asleep = entries.filter((entry) => !this.machineReady(entry.vmId));
     for (const entry of worktreeName.test(name) ? [...awake, ...asleep] : []) {
-      if (!this.backend(entry.vmId)) progress(vmId ? this.wakeStep(entry.vmId) : `Waking ${this.store.vm(entry.vmId)?.name ?? entry.vmId} to look for it`);
-      await this.ensureTelling(entry.vmId, detail);
-      const box = this.boxes.get(entry.vmId);
-      if (!box) continue;
+      if (!this.machineReady(entry.vmId)) progress(vmId ? this.wakeStep(entry.vmId) : `Waking ${this.store.vm(entry.vmId)?.name ?? entry.vmId} to look for it`);
+      const box = await this.machine(entry.vmId, detail);
       const path = worktreePath(entry.checkoutPath!, name);
       const release = this.lease(entry.vmId);
       try {

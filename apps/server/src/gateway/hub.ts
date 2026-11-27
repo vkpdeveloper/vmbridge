@@ -1063,6 +1063,7 @@ export class Hub extends EventEmitter<HubEvents> {
       load: (vm) => this.load(vm),
       placed: (vmId) => this.launches.set(`opencode:${crypto.randomUUID()}`, { vmId, at: Date.now() }),
       progress,
+      forOpenCode: true,
     });
   }
 

@@ -372,7 +372,7 @@ export class OpenCodeGateway {
     const known = target.worktree?.vmId ?? primaryVm(project)?.vmId;
     let ready: Promise<{ vmId: string; server: OpenCodeServer }>;
     if (waking) ready = target.worktree ? this.wakeVm(target.worktree.vmId) : this.wake(project.id);
-    else if (known && this.fleet.backend(known)) ready = this.fleet.opencode(known).then((server) => ({ vmId: known, server }));
+    else if (known && this.fleet.machineReady(known)) ready = this.fleet.opencode(known).then((server) => ({ vmId: known, server }));
     else return tryAgain("This project's VM is asleep. Send a request to wake it.");
     const info = waking && request.method === "GET" && pathname === "/api/info";
     const found = await within(ready, info ? Math.min(infoWaitMs, this.wakeWaitMs) : this.wakeWaitMs);
@@ -413,11 +413,12 @@ export class OpenCodeGateway {
 
   /** Wakes the project's VM, making it one if it has none, and starts OpenCode there. */
   private async wake(projectId: string) {
-    return this.wakeVm(await this.fleet.place(projectId));
+    return this.wakeVm(await this.fleet.place(projectId, undefined, true));
   }
 
+  /** OpenCode needs the VM prepared, not T3, so this never waits for T3 to start. */
   private async wakeVm(vmId: string) {
-    await this.fleet.ensure(vmId);
+    await this.fleet.machine(vmId);
     return { vmId, server: await this.fleet.opencode(vmId) };
   }
 

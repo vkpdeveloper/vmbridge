@@ -566,6 +566,51 @@ describe("placing new threads", () => {
     expect(details).toEqual(["Waiting for boxd", "Preparing the VM", "Starting T3", "Waiting for T3 to answer", "Reading T3's settings"]);
   });
 
+  test("for OpenCode, a placement waits only until the VM is prepared, never for T3, which goes on starting", async () => {
+    const { primary, fleet } = await placed();
+    await fleet.sleep(primary);
+    await Bun.sleep(2);
+    const t3Answers = gate();
+    fleet.onConnect = () => t3Answers.promise;
+    const details: string[] = [];
+    const placement = await fleet.placeThread("p1", {
+      load: (vm): VmLoad => ({ vmId: vm.id, awake: Boolean(fleet.backend(vm.id)), turns: 0, vcpus: 2, memory: null, disk: null }),
+      placed: () => {},
+      progress: () => {},
+      detail: (text) => details.push(text),
+      forOpenCode: true,
+    });
+    expect(placement.vmId).toBe(primary);
+    expect(details).toEqual(["Waiting for boxd", "Preparing the VM"]);
+    expect(fleet.machineReady(primary)).toBe(true);
+    expect(fleet.backend(primary)).toBeUndefined();
+    t3Answers.release();
+    await until(() => Boolean(fleet.backend(primary)));
+  });
+
+  test("T3 failing after OpenCode took the VM leaves it awake for OpenCode", async () => {
+    const { primary, fleet, store, events } = await placed();
+    await fleet.sleep(primary);
+    await Bun.sleep(2);
+    const t3Answers = gate();
+    fleet.onConnect = async () => {
+      await t3Answers.promise;
+      throw new Error("T3 sent something unexpected.");
+    };
+    const wake = fleet.ensure(primary);
+    wake.catch(() => {});
+    await fleet.machine(primary);
+    // As a worktree being made, or OpenCode starting, holds it.
+    const release = fleet.lease(primary);
+    events.length = 0;
+    t3Answers.release();
+    await expect(wake).rejects.toThrow("T3 sent something unexpected.");
+    release();
+    expect(events).toEqual([]);
+    expect(store.vm(primary)).toMatchObject({ state: "error" });
+    expect(fleet.machineReady(primary)).toBe(true);
+  });
+
   test("a sleeping VM with room is woken before a new one is made", async () => {
     const { primary, turns, fleet, events, placeThread } = await placed();
     turns.set(primary, 4);
