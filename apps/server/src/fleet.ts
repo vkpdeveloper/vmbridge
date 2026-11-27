@@ -422,7 +422,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
       const backend = await this.connect(vm, box, await version, async (preview) => {
         if (wasAsleep || !vm.t3Token) return true;
         const shell = await new Backend(vmId, preview, vm.t3Token, this.openSocket).json<Shell>("/api/orchestration/shell").catch(() => null);
-        return Boolean(shell && !hasLiveWork(shell)) && !(await openCodeBusy(woken).catch(() => false));
+        return Boolean(shell && !hasLiveWork(shell)) && !(await openCodeBusy(woken).catch(() => true));
       }, watch);
       watch.done();
       this.touch(vmId);
@@ -475,11 +475,18 @@ export class Fleet extends EventEmitter<FleetEvents> {
     }
     // Before T3 starts or VM Bridge sends it anything, so no agent on a woken VM runs with old skills.
     if (await this.syncSkills(vm.id, box, prepared.skillsManifest)) watch.lap("sync skills");
-    const restart = vm.t3Credentials !== fingerprint && (await idle(preview));
-    // OpenCode reads the env file only as it starts. The next request for it starts it again.
+    let restart = vm.t3Credentials !== fingerprint && (await idle(preview));
+    // OpenCode reads the env file only as it starts. The next request for it starts it again. One that cannot be stopped
+    // would keep the old sign-ins, so T3 keeps them too: the VM still counts as behind, and a later sweep tries again.
     if (restart && vm.opencodePassword) {
       this.opencodes.delete(vm.id);
-      await stopOpenCode(box);
+      restart = await stopOpenCode(box).then(
+        () => true,
+        (error: unknown) => {
+          this.failed("stop OpenCode", error, { vmId: vm.id, provider: vm.provider });
+          return false;
+        },
+      );
     }
     let server = await startT3(box, vm.t3Token, restart, prepared.t3);
     watch.lap("start T3, session");
@@ -756,10 +763,13 @@ export class Fleet extends EventEmitter<FleetEvents> {
     }
   }
 
-  /** Whether an agent runs in OpenCode on an awake VM now. Asks the VM, so callers ask only when the answer matters. */
+  /**
+   * Whether an agent may be running in OpenCode on an awake VM now. Asks the VM, so callers ask only when the answer
+   * matters. A VM that could not be asked counts as busy, as T3 counts when it cannot be asked.
+   */
   async openCodeBusy(vmId: string) {
     const box = this.box(vmId);
-    return box ? openCodeBusy(box).catch(() => false) : false;
+    return box ? openCodeBusy(box).catch(() => true) : false;
   }
 
   /** Extends provider-side auto-stop timers while agents work. */
