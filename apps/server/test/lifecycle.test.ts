@@ -118,6 +118,8 @@ function setup(skillRoots?: string[]) {
   /** The VM's files, and its T3 server: whether it runs and the env file it started with, as agents inherit it. */
   const files: Record<string, string> = {};
   const server = { running: false, env: "", starts: 0, restarts: 0, failRestart: false };
+  /** What OpenCode's server on the VM says about its agents, and how often VM Bridge stopped it. */
+  const opencode = { busy: false, stops: 0 };
   /** What each skills sync sent, and the order skill syncs and T3 starts happened in. */
   const synced: { skills: { name: string; files?: unknown[] }[]; instructions: { agent: string; text: string }[] }[] = [];
   const order: string[] = [];
@@ -155,6 +157,7 @@ function setup(skillRoots?: string[]) {
       if (command.includes("auth session issue")) return ok("token");
       if (command.includes("well-known")) return server.running ? ok(JSON.stringify({ orchestrationProtocolVersion: 2 })) : failed;
       if (command.startsWith("rm -f ")) for (const path of command.slice(6).split(" ")) delete files[path];
+      if (command.includes("/api/session/active")) return ok(opencode.busy ? "busy" : "idle");
       // As skills.mjs does, minus the files.
       if (command.includes("skills.mjs")) {
         const incoming = JSON.parse(files["/workspace/.vmbridge/skills-incoming.json"]!) as {
@@ -186,7 +189,10 @@ function setup(skillRoots?: string[]) {
       order.push("start");
       startServer();
     },
-    process: () => ({
+    process: (name: string) => ({
+      stop: async () => {
+        if (name === "opencode") opencode.stops++;
+      },
       restart: async () => {
         server.restarts++;
         order.push("restart");
@@ -217,7 +223,7 @@ function setup(skillRoots?: string[]) {
     return fleet;
   };
   const fleet = newFleet();
-  return { t3, db, store, settings, secrets, fleet, newFleet, driver, box, events, traffic, recorded, signIns, agents, files, server, skills, synced, order, calls };
+  return { t3, db, store, settings, secrets, fleet, newFleet, driver, box, events, traffic, recorded, signIns, agents, files, server, opencode, skills, synced, order, calls };
 }
 
 describe("creating and deleting VMs", () => {
@@ -613,6 +619,24 @@ describe("idle sleep", () => {
     release();
   });
 
+  test("waits while an agent runs in OpenCode, which counts as activity, and goes ahead an idle period after it stops", async () => {
+    const { fleet, hub, store, events, opencode } = idleFleet();
+    const vm = await fleet.create();
+    await fleet.ensure(vm.id);
+    opencode.busy = true;
+    const first = later();
+    await hub.sweep(first);
+    expect(events).toEqual(["create", "wake"]);
+    expect(store.vm(vm.id)?.lastActivityAt).toBe(first);
+
+    opencode.busy = false;
+    // Within the idle period of the last time it was busy, the VM is not even asked.
+    await hub.sweep(first + 60_000);
+    expect(events).toEqual(["create", "wake"]);
+    await hub.sweep(first + 24 * 60 * 60_000);
+    expect(events).toEqual(["create", "wake", "sleep"]);
+  });
+
   test("is dropped when the VM started work while transcripts were being saved", async () => {
     const { fleet, hub, t3, events } = idleFleet();
     const vm = await fleet.create();
@@ -825,6 +849,28 @@ describe("sign-in changes", () => {
     await hub.sweep();
     expect(server.restarts).toBe(1);
     expect(server.env).toContain("export OPENCODE_API_KEY='oc-new'");
+  });
+
+  test("a VM with an agent running in OpenCode restarts only once it stops, and then stops OpenCode too", async () => {
+    const { fleet, hub, store, files, server, signIns, opencode } = idleFleet();
+    const vm = await fleet.create();
+    await fleet.ensure(vm.id);
+    // As once OpenCode has started there.
+    store.updateVm(vm.id, { opencodePassword: "vm-password" });
+    opencode.busy = true;
+
+    signIns.opencodeApiKey = "oc-new";
+    await hub.credentialsChanged();
+    expect(files[envPath]).toContain("export OPENCODE_API_KEY='oc-new'");
+    await hub.sweep();
+    expect(server.restarts).toBe(0);
+    expect(opencode.stops).toBe(0);
+
+    opencode.busy = false;
+    await hub.sweep();
+    expect(server.restarts).toBe(1);
+    // The next OpenCode request starts it again, with the new key.
+    expect(opencode.stops).toBe(1);
   });
 
   test("a VM held by a request restarts only once the request is done", async () => {

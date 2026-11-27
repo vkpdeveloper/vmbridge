@@ -1,4 +1,4 @@
-import type { SandboxBase } from "@opencoredev/sandbox-sdk";
+import type { Preview, SandboxBase } from "@opencoredev/sandbox-sdk";
 import type { SandboxInfo } from "@opencoredev/sandbox-sdk/provider";
 import type { ProviderFeatures, ProviderField, ProviderId, SelectOption, VmSize } from "@vmbridge/contracts";
 
@@ -12,7 +12,7 @@ export interface CreateVm {
   key: string;
   size: VmSize;
   labels: Record<string, string>;
-  /** Ports the T3 server needs reachable from VM Bridge. */
+  /** Ports VM Bridge needs reachable: T3's and OpenCode's. */
   ports: number[];
 }
 
@@ -61,6 +61,11 @@ export interface Driver {
   deleteCheckpoint(checkpoint: string): Promise<void>;
   /** A stream of the VM's screen, or null while it is not running. Never wakes it. Present when the definition's `screen` is. */
   screen?(sandboxId: string): Promise<ScreenStream | null>;
+  /**
+   * A preview of a port other than T3's. Absent: `box.preview(port)`, which suits providers that give each port its own
+   * preview. boxd's preview points the machine's one default route at the port, which would take it from T3.
+   */
+  preview?(box: Box, port: number): Promise<Preview>;
 }
 
 export interface ProviderDefinition {

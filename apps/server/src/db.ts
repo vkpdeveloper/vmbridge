@@ -329,6 +329,12 @@ export const migrations = [
   );
   CREATE INDEX project_icons_revision ON project_icons (revision);
   `,
+  // Passwords, both encrypted, for OpenCode (see gateway/opencode.ts): the one each VM's own server takes, and the one a
+  // project's OpenCode clients give VM Bridge.
+  `
+  ALTER TABLE vms ADD COLUMN opencode_password TEXT;
+  ALTER TABLE projects ADD COLUMN opencode_password TEXT;
+  `,
 ];
 
 /**

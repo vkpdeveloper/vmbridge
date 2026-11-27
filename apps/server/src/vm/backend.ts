@@ -16,6 +16,17 @@ const disconnected = (requestId: string): Exit => ({
   exit: { _tag: "Failure", cause: [{ _tag: "Die", defect: "The VM disconnected. Retry once it is back." }] },
 });
 
+/** `path`, with any query, on a VM's preview. */
+export function previewTarget(preview: Preview, path: string) {
+  const base = new URL(preview.url);
+  const url = new URL(path, base.origin);
+  // Some providers carry preview credentials in the query string. They replace any the client sent under the same
+  // name, which would otherwise reach the provider's proxy in place of the real ones.
+  for (const key of new Set(base.searchParams.keys())) url.searchParams.delete(key);
+  for (const [key, value] of base.searchParams) url.searchParams.append(key, value);
+  return url;
+}
+
 /**
  * A connection to the T3 server on one VM: authenticated HTTP plus the RPC WebSocket.
  * The bearer token and preview headers never leave this class.
@@ -40,13 +51,7 @@ export class Backend {
   }
 
   private url(path: string) {
-    const base = new URL(this.preview.url);
-    const url = new URL(path, base.origin);
-    // Some providers carry preview credentials in the query string. They replace any the client sent under the same
-    // name, which would otherwise reach the provider's proxy in place of the real ones.
-    for (const key of new Set(base.searchParams.keys())) url.searchParams.delete(key);
-    for (const [key, value] of base.searchParams) url.searchParams.append(key, value);
-    return url;
+    return previewTarget(this.preview, path);
   }
 
   private headers(extra?: RequestInit["headers"]) {

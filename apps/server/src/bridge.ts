@@ -10,6 +10,7 @@ import { Fleet } from "./fleet.ts";
 import { Clones } from "./gateway/clones.ts";
 import { FileTrees } from "./gateway/files.ts";
 import { T3Gateway } from "./gateway/http.ts";
+import { OpenCodeGateway } from "./gateway/opencode.ts";
 import { Hub } from "./gateway/hub.ts";
 import { RemoteBranches } from "./gateway/repos.ts";
 import { Rpc } from "./gateway/rpc.ts";
@@ -78,6 +79,7 @@ export function openBridge(runtime: BridgeRuntime) {
   });
   const rpc = new Rpc(hub, clones, branches, traffic, () => secrets.has("github.token"), files);
   const gateway = new T3Gateway(hub, rpc, clients);
+  const opencode = new OpenCodeGateway(store, fleet, traffic, () => Boolean(settings.get("agentProfiles").opencode));
   const auth = new DashboardAuth(db, secrets, runtime.passwords);
   const watch = new Watch({
     links: new WatchLinks(db, encryption),
@@ -88,7 +90,7 @@ export function openBridge(runtime: BridgeRuntime) {
     addresses: runtime.addresses,
     page: runtime.watchPage,
   });
-  return { settings, encryption, key, secrets, store, traffic, agents, skills, fleet, stats, usage, budget, hub, gateway, clients, auth, watch };
+  return { settings, encryption, key, secrets, store, traffic, agents, skills, fleet, stats, usage, budget, hub, gateway, opencode, clients, auth, watch };
 }
 
 export type Bridge = ReturnType<typeof openBridge>;
