@@ -26,7 +26,7 @@ ${faq
 
 ## Docs
 
-- [Docs](${site.url}/docs): install, setup, pairing T3 Code, how requests flow, sleep and wake, providers, agent sign-ins, environment variables, skills, AGENTS.md, Tailscale, data and security, troubleshooting
+- [Docs](${site.url}/docs): install, setup, pairing T3 Code, OpenCode (\`vb opencode\`), how requests flow, sleep and wake, providers, agent sign-ins, environment variables, skills, AGENTS.md, Tailscale, data and security, troubleshooting
 - [FAQ](${site.url}/faq): the questions answered above, on one page
 - [Providers](${blob}/docs/PROVIDERS.md): sizes, sleep behaviour, safety nets and measured times for each provider
 - [README](${github}#readme): install and commands
