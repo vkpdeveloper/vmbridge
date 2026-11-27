@@ -100,7 +100,7 @@ Limitation.
 
 **Why it matters.** A bridge must take one VM's config, then remove or replace the parts that describe that VM or its credentials, and set each flag to what the bridge itself supports. Every new config field is a new decision, and a missed one can leak a VM's details to the client.
 
-**What VM Bridge does.** `Hub.config` copies the first VM's config, replaces `environment`, `auth`, `providers` and `providerInstances`, empties `secretProviders`, `usageLimitSources` and `textGenerators`, deletes `directEndpoints`, and sets `shellResumeCompletionMarker`, `shellThreadFamilies`, `shellOlderSettled` and `threadSnapshotPagination` itself (`apps/server/src/gateway/hub.ts:312`).
+**What VM Bridge does.** `Hub.config` copies the first VM's config, replaces `environment`, `auth`, `providers` and `providerInstances`, empties `secretProviders`, `usageLimitSources` and `textGenerators`, deletes `directEndpoints`, and sets `shellResumeCompletionMarker`, `shellThreadFamilies`, `shellOlderSettled` and `threadSnapshotPagination` itself (`apps/server/src/gateway/hub.ts:312`). It also lays its own saved state over the copy: keyboard shortcuts saved from T3 (`apps/server/src/gateway/keybindings.ts`) over the VM's defaults, and the settings in `fleetSettingKeys` (`apps/server/src/gateway/fleet-settings.ts`), which it also sets on every VM. That is what lets it grant `settings:write`: one scope covers every settings write, so the gateway refuses the settings it can't save by name rather than leaving all of them read-only.
 
 **Suggested change.** Split config into environment-level settings and capabilities versus host details, and keep each capability flag in one place.
 
