@@ -249,11 +249,13 @@ export class OpenCodeGateway {
     return { projectId, path: search ? `${path}?${search}` : path };
   }
 
+  private accepts(projectId: string, password: string | null) {
+    const expected = this.store.openCodePassword(projectId);
+    return password !== null && expected !== null && same(password, expected);
+  }
+
   private projectFor(password: string) {
-    return this.store.projects().find((project) => {
-      const expected = this.store.openCodePassword(project.id);
-      return expected !== null && same(password, expected);
-    });
+    return this.store.projects().find((project) => this.accepts(project.id, password));
   }
 
   private async route(request: Request, relay: WatchUpgrade, seen: Seen): Promise<Response | undefined> {
@@ -274,8 +276,7 @@ export class OpenCodeGateway {
     let signedIn = false;
     if (password !== null) {
       if (target.projectId === null) project = this.projectFor(password);
-      const expected = project && this.store.openCodePassword(project.id);
-      signedIn = Boolean(expected && same(password, expected));
+      signedIn = Boolean(project && this.accepts(project.id, password));
     }
     const withTicket = upgrade && url.searchParams.has("ticket") && ticketed.some((pattern) => pattern.test(pathname));
     // An unknown project gets the same answer as a wrong password.
@@ -295,6 +296,11 @@ export class OpenCodeGateway {
     else return tryAgain("This project's VM is asleep. Send a request to wake it.");
     const found = await within(ready, this.wakeWaitMs);
     if (!found) return tryAgain("This project's VM is waking. Try again in a moment.");
+    // A new password while this waited ended only the connections open then, so this one is checked again.
+    if (signedIn && !this.accepts(project.id, password)) {
+      seen.refusal = "wrong password";
+      return unauthorized(request);
+    }
     const { vmId, server } = found;
     seen.vmId = vmId;
     if (upgrade) return this.socket(request, relay, vmId, server, target.path, seen);

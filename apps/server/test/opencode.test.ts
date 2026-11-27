@@ -59,7 +59,7 @@ function setup({ awake = true, wakeMs = 0, wakeWaitMs = 1_000, port = vm.port } 
     forgetOpenCode: () => void calls.forgot++,
   }) as unknown as Fleet;
   const gateway = new OpenCodeGateway(store, fleet, new Traffic(db), () => true, wakeWaitMs);
-  return { gateway, calls };
+  return { gateway, calls, store };
 }
 
 const basic = (password: string) => `Basic ${btoa(`opencode:${password}`)}`;
@@ -156,6 +156,16 @@ describe("OpenCode gateway", () => {
     const response = await send(gateway, "/opencode/p1/api/session", { headers: { authorization: basic(projectPassword) } });
     expect(response.status).toBe(200);
     expect(calls.ensure).toBe(1);
+  });
+
+  test("a request that waited while the password changed is refused, as the change ended only open connections", async () => {
+    const { gateway, store } = setup({ awake: false, wakeMs: 100 });
+    const waiting = send(gateway, "/opencode/p1/api/session", { headers: { authorization: basic(projectPassword) } });
+    await Bun.sleep(20);
+    store.setOpenCodePassword("p1", "renewed-pass");
+    gateway.disconnect("p1");
+    expect((await waiting).status).toBe(401);
+    expect(asked).toEqual([]);
   });
 
   test("asks the client to try again when waking takes too long", async () => {

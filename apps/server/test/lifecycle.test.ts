@@ -118,8 +118,11 @@ function setup(skillRoots?: string[]) {
   /** The VM's files, and its T3 server: whether it runs and the env file it started with, as agents inherit it. */
   const files: Record<string, string> = {};
   const server = { running: false, env: "", starts: 0, restarts: 0, failRestart: false };
-  /** What OpenCode's server on the VM says about its agents, and how often VM Bridge stopped it. */
-  const opencode = { busy: false, stops: 0 };
+  /**
+   * What OpenCode's server on the VM says about its agents, or another probe `answer`, and how often VM Bridge stopped
+   * it. With `failStop`, stopping it fails.
+   */
+  const opencode = { busy: false, answer: undefined as string | undefined, stops: 0, failStop: false };
   /** What each skills sync sent, and the order skill syncs and T3 starts happened in. */
   const synced: { skills: { name: string; files?: unknown[] }[]; instructions: { agent: string; text: string }[] }[] = [];
   const order: string[] = [];
@@ -157,7 +160,7 @@ function setup(skillRoots?: string[]) {
       if (command.includes("auth session issue")) return ok("token");
       if (command.includes("well-known")) return server.running ? ok(JSON.stringify({ orchestrationProtocolVersion: 2 })) : failed;
       if (command.startsWith("rm -f ")) for (const path of command.slice(6).split(" ")) delete files[path];
-      if (command.includes("/api/session/active")) return ok(opencode.busy ? "busy" : "idle");
+      if (command.includes("/api/session/active")) return ok(opencode.answer ?? (opencode.busy ? "busy" : "idle"));
       // As skills.mjs does, minus the files.
       if (command.includes("skills.mjs")) {
         const incoming = JSON.parse(files["/workspace/.vmbridge/skills-incoming.json"]!) as {
@@ -191,6 +194,7 @@ function setup(skillRoots?: string[]) {
     },
     process: (name: string) => ({
       stop: async () => {
+        if (name === "opencode" && opencode.failStop) throw new Error("The provider did not answer.");
         if (name === "opencode") opencode.stops++;
       },
       restart: async () => {
@@ -870,6 +874,40 @@ describe("sign-in changes", () => {
     await hub.sweep();
     expect(server.restarts).toBe(1);
     // The next OpenCode request starts it again, with the new key.
+    expect(opencode.stops).toBe(1);
+  });
+
+  test("an OpenCode that does not answer may be running an agent, so the VM waits to restart", async () => {
+    const { fleet, hub, store, server, signIns, opencode } = idleFleet();
+    const vm = await fleet.create();
+    await fleet.ensure(vm.id);
+    store.updateVm(vm.id, { opencodePassword: "vm-password" });
+    opencode.answer = "unknown";
+    signIns.opencodeApiKey = "oc-new";
+    await hub.credentialsChanged();
+    await hub.sweep();
+    expect(server.restarts).toBe(0);
+
+    // Nothing listening is as good as idle.
+    opencode.answer = "down";
+    await hub.sweep();
+    expect(server.restarts).toBe(1);
+  });
+
+  test("a stop that fails while OpenCode still answers holds back the restart, which the next sweep tries again", async () => {
+    const { fleet, hub, store, server, signIns, opencode } = idleFleet();
+    const vm = await fleet.create();
+    await fleet.ensure(vm.id);
+    store.updateVm(vm.id, { opencodePassword: "vm-password" });
+    opencode.failStop = true;
+    signIns.opencodeApiKey = "oc-new";
+    await hub.credentialsChanged();
+    await hub.sweep();
+    expect(server.restarts).toBe(0);
+
+    opencode.failStop = false;
+    await hub.sweep();
+    expect(server.restarts).toBe(1);
     expect(opencode.stops).toBe(1);
   });
 

@@ -190,7 +190,7 @@ export const copy = {
     /** 80. Before the terminal command. */
     terminal: "In a terminal, put the password in OPENCODE_PASSWORD and run:",
     /** With an example of the address the dashboard shows. */
-    command: "opencode --server https://bridge.example.com/opencode/<project>",
+    command: "opencode --server https://bridge.example.com/opencode/my-project",
     notes: [
       "The first request wakes the VM. If OpenCode gives up while it wakes, connect again.",
       "Agents keep running after OpenCode closes. The VM sleeps once no OpenCode agent is running and nothing has used it for the idle time.",

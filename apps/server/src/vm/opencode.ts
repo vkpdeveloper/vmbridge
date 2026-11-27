@@ -25,11 +25,11 @@ exec opencode serve --hostname 0.0.0.0 --port ${opencodePort}
 
 /**
  * Asks the server on the VM itself, so it needs no preview: prints busy or idle, refused when it has another password,
- * or down when nothing answers.
+ * down when nothing listens, or unknown when the request failed another way, such as timing out.
  */
 const probeScript = `const auth="Basic "+Buffer.from("opencode:"+require("fs").readFileSync(process.argv[1],"utf8")).toString("base64");
 fetch("http://127.0.0.1:${opencodePort}/api/session/active",{headers:{authorization:auth},signal:AbortSignal.timeout(10000)})
-.then(async(r)=>r.status===401?"refused":r.ok?(Object.keys((await r.json()).data??{}).length?"busy":"idle"):"status "+r.status,()=>"down")
+.then(async(r)=>r.status===401?"refused":r.ok?(Object.keys((await r.json()).data??{}).length?"busy":"idle"):"status "+r.status,(e)=>e?.cause?.code==="ECONNREFUSED"?"down":"unknown")
 .then((s)=>process.stdout.write(s))`;
 const probe = `node -e ${quote(probeScript)} ${passwordPath}`;
 
@@ -82,19 +82,30 @@ export async function startOpenCode(box: Box, password: string, cwd: string) {
   await runProgram(box, `. ${root}/env\n${waitScript}`, "Starting OpenCode", 150_000);
 }
 
-/** Whether an agent runs in OpenCode on the VM now. False when OpenCode is not running. */
-export async function openCodeBusy(box: Box) {
+async function probeState(box: Box) {
   const answer = await box.run(`[ -f ${passwordPath} ] && . ${root}/env && ${probe} || echo down`, { timeoutMs: 20_000 });
-  return answer.stdout.trim() === "busy";
+  return answer.stdout.trim();
 }
 
-/** Stops OpenCode, so the next request starts it again with the env file as it is now. Nothing to stop is fine. */
+/**
+ * Whether an agent may be running in OpenCode on the VM now. Only an idle answer or nothing listening says no, so a
+ * server that did not answer in time is not restarted or put to sleep under a running agent. A server with another
+ * password counts as idle: VM Bridge cannot reach its agents, and the next request replaces it.
+ */
+export async function openCodeBusy(box: Box) {
+  return !["idle", "down", "refused"].includes(await probeState(box));
+}
+
+/**
+ * Stops OpenCode, so the next request starts it again with the env file as it is now. Providers word "not running"
+ * differently, so after a failed stop, only nothing listening counts as stopped.
+ */
 export async function stopOpenCode(box: Box) {
-  try {
-    await box.process(processName).stop();
-  } catch {
-    // Not running.
-  }
+  const stopped = await box.process(processName).stop().then(
+    () => true,
+    () => false,
+  );
+  if (!stopped && (await probeState(box)) !== "down") throw new Error("VM Bridge could not stop OpenCode on the VM.");
 }
 
 export class OpenCodeUnreachable extends Error {}
