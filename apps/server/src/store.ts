@@ -356,6 +356,11 @@ export class Store {
     } else this.db.run("UPDATE opencode_worktrees SET last_used_at = ? WHERE project_id = ? AND name = ?", Date.now(), projectId, name);
   }
 
+  /** The branch a worktree is on, as its VM last said. An agent may switch it from the one it started on. */
+  setOpenCodeWorktreeBranch(projectId: string, name: string, branch: string) {
+    this.db.run("UPDATE opencode_worktrees SET branch = ? WHERE project_id = ? AND name = ?", branch, projectId, name);
+  }
+
   removeOpenCodeWorktree(projectId: string, name: string) {
     this.db.run("DELETE FROM opencode_worktrees WHERE project_id = ? AND name = ?", projectId, name);
   }

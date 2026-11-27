@@ -198,11 +198,11 @@ async function open(root: string, body: { remote: string; branch: string | null;
     headers: { authorization: `Bearer ${session.token}`, "content-type": "application/json" },
     body: JSON.stringify({ projectId: ready.projectId, vmId: ready.vmId, name: ready.name }),
   })
-    .then((response) => (response.ok ? (response.json() as Promise<{ removed: boolean }>) : null))
+    .then((response) => (response.ok ? (response.json() as Promise<{ removed: boolean; branch?: string | null }>) : null))
     .catch(() => null);
   if (answer?.removed) console.log(`Removed the worktree ${ready.branch}.`);
   else {
-    console.log(`Kept the worktree ${ready.branch} on ${ready.vm}: it has work that is not pushed, or an agent is still running.`);
+    console.log(`Kept the worktree ${answer?.branch ?? ready.branch} on ${ready.vm}: it has work that is not pushed, or an agent is still running.`);
     console.log(`Open it again with: vb opencode resume ${ready.name}`);
   }
 }

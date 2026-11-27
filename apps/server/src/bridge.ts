@@ -80,7 +80,7 @@ export function openBridge(runtime: BridgeRuntime) {
   });
   const rpc = new Rpc(hub, clones, branches, traffic, () => secrets.has("github.token"), files);
   const hasOpenCodeKey = () => Boolean(settings.get("agentProfiles").opencode);
-  const gateway = new T3Gateway(hub, rpc, clients, openCodeLauncher({ store, hub, clones, traffic, hasKey: hasOpenCodeKey }));
+  const gateway = new T3Gateway(hub, rpc, clients, openCodeLauncher({ store, hub, clones, traffic, hasKey: hasOpenCodeKey, githubToken: () => secrets.get("github.token") }));
   const opencode = new OpenCodeGateway(store, fleet, traffic, hasOpenCodeKey);
   const auth = new DashboardAuth(db, secrets, runtime.passwords);
   const watch = new Watch({

@@ -296,9 +296,10 @@ It needs an OpenCode API key in **Accounts** and OpenCode 2 on your computer
 another, run `vb login` once with a pairing link from **Devices**. When you close OpenCode, the
 worktree is removed unless it has changes or commits that are not pushed.
 
-`vb opencode resume` lists the repository's worktrees still on its VMs, last used first, with the VM
-they are on and the start of the last prompt in each. VM Bridge keeps that list itself, so it shows
-at once without waking a VM. Pick one with the arrow keys and Enter: VM Bridge wakes that VM and
+`vb opencode resume` lists the repository's worktrees still on its VMs, last used first. Each shows
+the branch it is on, that branch's pull request when GitHub has one, its VM and whether that VM is
+running, and the start of the last prompt. VM Bridge keeps that list itself, so it shows without
+waking a VM. Pick one with the arrow keys and Enter: VM Bridge wakes that VM and
 OpenCode opens in the session you last prompted there. `vb opencode resume <id>` skips the list.
 
 To connect an OpenCode app yourself, choose **Connect OpenCode** next to a repository on the

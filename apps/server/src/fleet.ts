@@ -1061,17 +1061,18 @@ printf '%s' "$base"`,
   /**
    * Removes a worktree `worktree` made once nothing in it would be lost (see `removeWorktreeProgram`). It stays while an
    * OpenCode agent runs on the VM, which may be working in it, and when the VM is asleep, which is not worth waking for.
-   * Answers whether it is gone.
+   * Answers whether it is gone, and the branch a kept one is on when the VM said.
    */
-  async removeWorktree(vmId: string, projectId: string, name: string): Promise<boolean> {
+  async removeWorktree(vmId: string, projectId: string, name: string): Promise<{ removed: boolean; branch?: string }> {
     const box = this.boxes.get(vmId);
     const checkout = this.project(projectId).vms.find((entry) => entry.vmId === vmId)?.checkoutPath;
-    if (!box || !checkout || !worktreeName.test(name)) return false;
+    if (!box || !checkout || !worktreeName.test(name)) return { removed: false };
     const release = this.lease(vmId);
     try {
-      if (await openCodeBusy(box)) return false;
+      if (await openCodeBusy(box)) return { removed: false };
       const answer = await runProgram(box, removeWorktreeProgram(checkout, name), "Removing a worktree");
-      return answer === "removed";
+      if (answer === "removed") return { removed: true };
+      return { removed: false, branch: answer.replace(/^kept ?/, "").trim() || undefined };
     } finally {
       release();
     }

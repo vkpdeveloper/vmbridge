@@ -723,13 +723,23 @@ export type OpenCodeLaunchEvent =
     };
 
 /** A worktree `vmbridge opencode resume` can open again, as `GET /api/vmbridge/opencode?remote=` lists them. */
+/** A pull request on GitHub, by the state it shows there. */
+export interface PullRequest {
+  number: number;
+  url: string;
+  state: "open" | "draft" | "merged" | "closed";
+}
+
 export interface OpenCodeWorktree {
   name: string;
+  /** The branch it is on, as its VM last said. It starts as `opencode/<name>`, and an agent may switch it. */
   branch: string;
   base: string | null;
   vm: string;
   /** Whether its VM sleeps, so opening it wakes the VM first. */
   asleep: boolean;
+  /** The branch's pull request on GitHub, when it has one and VM Bridge could ask. */
+  pullRequest: PullRequest | null;
   /** The start of the last prompt in it. */
   lastPrompt: string | null;
   /** ISO times. */

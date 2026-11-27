@@ -189,7 +189,7 @@ export const copy = {
       "It needs OpenCode 2 on this computer: npm install -g @opencode/cli.",
       "Each run gets its own worktree on a new opencode/ branch, from your current branch if origin has it, else the default branch. --branch picks another.",
       "When you close OpenCode, the worktree goes, unless it has changes or commits that are not pushed.",
-      "vb opencode resume lists the worktrees still on the VMs, last used first, without waking any. Pick one and OpenCode opens on its VM, in the session you last prompted there.",
+      "vb opencode resume lists the worktrees still on the VMs, last used first, with each one's branch, pull request and whether its VM is running, without waking any. Pick one and OpenCode opens on its VM, in the session you last prompted there.",
       "On the computer VM Bridge runs on, it signs itself in. On another, run vb login once with a pairing link from Devices.",
       "vb is a short name for vmbridge.",
     ],

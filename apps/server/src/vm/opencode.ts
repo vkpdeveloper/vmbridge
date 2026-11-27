@@ -20,14 +20,16 @@ export const worktreeName = /^[a-z0-9]{4,32}$/;
 
 /**
  * Removes a worktree and its `opencode/<name>` branch once nothing would be lost: no uncommitted or untracked files,
- * and no commit that is not on the remote. Prints `removed` or `kept`.
+ * and no commit that is not on the remote. Prints `removed`, or `kept` and the branch it is on, which an agent may have
+ * changed.
  */
 export function removeWorktreeProgram(checkout: string, name: string) {
   const path = quote(worktreePath(checkout, name));
+  const keep = `{ printf 'kept %s' "$(git -C ${path} branch --show-current)"; exit 0; }`;
   return `cd ${quote(checkout)}
 if [ -d ${path} ]; then
-  [ -z "$(git -C ${path} status --porcelain)" ] || { printf kept; exit 0; }
-  [ -z "$(git -C ${path} rev-list -1 HEAD --not --remotes)" ] || { printf kept; exit 0; }
+  [ -z "$(git -C ${path} status --porcelain)" ] || ${keep}
+  [ -z "$(git -C ${path} rev-list -1 HEAD --not --remotes)" ] || ${keep}
   git worktree remove --force ${path}
 fi
 git worktree prune

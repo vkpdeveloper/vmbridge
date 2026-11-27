@@ -1,4 +1,4 @@
-import type { GitHubAccount } from "@vmbridge/contracts";
+import type { GitHubAccount, PullRequest } from "@vmbridge/contracts";
 
 export class GitHubRejected extends Error {}
 
@@ -58,4 +58,22 @@ export async function fetchGitHubRepos(token: string): Promise<string[]> {
   });
   if (!response.ok) throw new GitHubRejected(`GitHub answered ${response.status}.`);
   return ((await response.json()) as { full_name: string }[]).map((repo) => repo.full_name);
+}
+
+/**
+ * The pull request from `branch` of `repository` (`owner/name`), the newest when there were several, or null when it
+ * has none or GitHub did not answer in time.
+ */
+export async function fetchPullRequest(repository: string, branch: string, token?: string): Promise<PullRequest | null> {
+  const owner = repository.split("/")[0];
+  const query = new URLSearchParams({ head: `${owner}:${branch}`, state: "all", per_page: "1" });
+  const response = await fetch(`https://api.github.com/repos/${repository}/pulls?${query}`, {
+    headers: githubHeaders(token),
+    signal: AbortSignal.timeout(5_000),
+  }).catch(() => null);
+  if (!response?.ok) return null;
+  const [pull] = (await response.json().catch(() => [])) as { number: number; html_url: string; state: string; draft?: boolean; merged_at: string | null }[];
+  if (!pull) return null;
+  const state = pull.merged_at ? "merged" : pull.state === "closed" ? "closed" : pull.draft ? "draft" : "open";
+  return { number: pull.number, url: pull.html_url, state };
 }

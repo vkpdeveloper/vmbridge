@@ -1,6 +1,6 @@
 // `vmbridge opencode resume`: the list of a repository's worktrees to pick one from, last used first.
-import type { OpenCodeWorktree } from "@vmbridge/contracts";
-import { line, painter, type Output, type Paint, type Segment } from "./launch-view.ts";
+import type { OpenCodeWorktree, PullRequest } from "@vmbridge/contracts";
+import { line, painter, type Output, type Paint, type Segment, type Tone } from "./launch-view.ts";
 
 /** `just now`, `5m ago`, `3h ago`, `2d ago`. */
 export function ago(ms: number) {
@@ -10,6 +10,10 @@ export function ago(ms: number) {
   const hours = Math.floor(minutes / 60);
   return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
 }
+
+const pullTones: Record<PullRequest["state"], Tone> = { open: "success", draft: "muted", merged: "primary", closed: "destructive" };
+const pullText = (pull: PullRequest | null) => (pull ? `#${pull.number} ${pull.state}` : "");
+const vmText = (worktree: OpenCodeWorktree) => `${worktree.vm} ${worktree.asleep ? "○ asleep" : "● running"}`;
 
 /** How many worktrees show at once. The list scrolls past that. */
 const shown = 6;
@@ -23,15 +27,25 @@ export function pickerFrame(project: string, worktrees: OpenCodeWorktree[], sele
   if (first > 0) lines.push(line([["faint", `    ↑ ${first} more`]], inner, paint));
   for (const [offset, worktree] of worktrees.slice(first, first + shown).entries()) {
     const on = first + offset === selected;
-    const when = ago(now - Date.parse(worktree.lastUsedAt));
-    const where = `${worktree.vm}${worktree.asleep ? ", asleep" : ""}`;
-    const room = Math.max(0, inner - 4 - [...worktree.branch].length - where.length - when.length - 4);
+    const when = ago(now - Date.parse(worktree.lastUsedAt)).padStart(8);
+    const pull = pullText(worktree.pullRequest);
+    const right = `  ${vmText(worktree)}  ${when}`;
+    // The branch gives way first, so the pull request, the VM and the time stay whole. On a narrow terminal it keeps
+    // enough to tell it apart, and the end of the line is cut instead.
+    const chars = [...worktree.branch];
+    const room = Math.max(inner - 4 - (pull ? pull.length + 2 : 0) - right.length, Math.min(chars.length, 20));
+    const branch = chars.length <= room ? worktree.branch : `${chars.slice(0, Math.max(0, room - 1)).join("")}…`;
+    const gap = " ".repeat(Math.max(0, room - [...branch].length));
     const title: Segment[] = [
       [on ? "primary" : "faint", on ? "  ❯ " : "    "],
-      [on ? "foreground" : "muted", worktree.branch],
-      ["faint", `  ${where}${" ".repeat(room)}  `],
-      ["muted", when],
+      [on ? "foreground" : "muted", branch],
     ];
+    if (worktree.pullRequest) title.push(["faint", "  "], [pullTones[worktree.pullRequest.state], pull]);
+    title.push(
+      ["faint", `${gap}  ${worktree.vm} `],
+      worktree.asleep ? ["faint", "○ asleep"] : ["success", "● running"],
+      ["muted", `  ${when}`],
+    );
     lines.push(line(title, inner, paint));
     lines.push(line([["faint", "    "], [on ? "muted" : "faint", worktree.lastPrompt ?? "No prompt yet"]], inner, paint));
   }
@@ -56,7 +70,10 @@ export function keyOf(data: string): Key {
 export function worktreeList(project: string, worktrees: OpenCodeWorktree[], now: number) {
   return [
     `Worktrees of ${project}, last used first:`,
-    ...worktrees.map((worktree) => `  ${worktree.name}  ${worktree.branch}  ${worktree.vm}  ${ago(now - Date.parse(worktree.lastUsedAt))}  ${worktree.lastPrompt ?? ""}`.trimEnd()),
+    ...worktrees.map((worktree) => {
+      const parts = [worktree.name, worktree.branch, pullText(worktree.pullRequest), vmText(worktree), ago(now - Date.parse(worktree.lastUsedAt)), worktree.lastPrompt];
+      return `  ${parts.filter(Boolean).join("  ")}`;
+    }),
     "Open one with: vb opencode resume <id>",
   ];
 }

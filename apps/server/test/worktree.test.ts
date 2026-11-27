@@ -45,15 +45,16 @@ describe("removing a vmbridge opencode worktree", () => {
   test("stays while it has uncommitted or untracked files", () => {
     const { checkout, path, remove } = setUp("ab12cd34");
     writeFileSync(join(path, "notes.md"), "draft");
-    expect(remove()).toBe("kept");
+    expect(remove()).toBe("kept opencode/ab12cd34");
     expect(branches(checkout)).toContain("opencode/ab12cd34");
   });
 
-  test("stays while it has commits that are not pushed, and goes once they are", () => {
+  test("stays while it has commits that are not pushed, naming the branch an agent moved it to, and goes once they are", () => {
     const { path, commit, remove } = setUp("ab12cd34");
+    sh("git switch --quiet -c fix/login", path);
     commit("work");
-    expect(remove()).toBe("kept");
-    sh("git push --quiet origin opencode/ab12cd34", path);
+    expect(remove()).toBe("kept fix/login");
+    sh("git push --quiet origin fix/login", path);
     expect(remove()).toBe("removed");
   });
 

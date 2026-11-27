@@ -2,17 +2,19 @@
 import type { OpenCodeLaunchEvent, OpenCodeWorktrees } from "@vmbridge/contracts";
 import { newToken } from "../auth/tokens.ts";
 import { message } from "../fleet.ts";
+import { fetchPullRequest } from "../github.ts";
 import type { Store } from "../store.ts";
 import type { Traffic } from "../traffic.ts";
 import { NoOpenCodeKey } from "../vm/opencode.ts";
 import type { Clones } from "./clones.ts";
 import type { Hub } from "./hub.ts";
+import { githubName } from "./repos.ts";
 import { openCodePrefix } from "./opencode.ts";
 
 /** A branch as the clone flow takes one. */
 const branchName = (branch: string) => /^[\w./-]+$/.test(branch) && !branch.startsWith("-") && !branch.includes("..");
 
-type Deps = { store: Store; hub: Hub; clones: Clones; traffic: Traffic; hasKey: () => boolean };
+type Deps = { store: Store; hub: Hub; clones: Clones; traffic: Traffic; hasKey: () => boolean; githubToken: () => string | undefined };
 
 /**
  * `/api/vmbridge/opencode`. POST starts OpenCode in a new worktree, or one made before (see `launch`). DELETE, sent when
@@ -20,7 +22,7 @@ type Deps = { store: Store; hub: Hub; clones: Clones; traffic: Traffic; hasKey: 
  */
 export function openCodeLauncher(deps: Deps) {
   return async (request: Request): Promise<Response> => {
-    if (request.method === "GET") return list(deps, request);
+    if (request.method === "GET") return await list(deps, request);
     if (request.method === "POST") return launch(deps, request);
     if (request.method === "DELETE") return finish(deps, request);
     return new Response("Method Not Allowed", { status: 405 });
@@ -73,8 +75,10 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
           vmId = found.vmId;
           worktree = { ...found, name: resume, base: noted?.base ?? null };
           sessionId = noted?.sessionId ?? null;
-          if (noted) store.touchOpenCodeWorktree(project.id, resume);
-          else store.addOpenCodeWorktree({ projectId: project.id, vmId, name: resume, branch: found.branch, base: null });
+          if (noted) {
+            store.touchOpenCodeWorktree(project.id, resume);
+            store.setOpenCodeWorktreeBranch(project.id, resume, found.branch);
+          } else store.addOpenCodeWorktree({ projectId: project.id, vmId, name: resume, branch: found.branch, base: null });
         } else {
           step(`Finding a VM for ${project.title}`);
           const placement = await hub.placeOpenCode(project.id, step, detail);
@@ -112,7 +116,10 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
   return new Response(stream, { headers: { "content-type": "application/x-ndjson", "cache-control": "no-store" } });
 }
 
-/** Removes a worktree `launch` made. Answers `{ removed }`: false when it holds work, or an agent may be using it. */
+/**
+ * Removes a worktree `launch` made. Answers `{ removed, branch }`: removed is false when it holds work, or an agent may be
+ * using it, and branch is the one a kept worktree is on when its VM said.
+ */
 async function finish({ store, hub, traffic }: Deps, request: Request) {
   const body = (await request.json().catch(() => null)) as { projectId?: unknown; vmId?: unknown; name?: unknown } | null;
   const { projectId, vmId, name } = body ?? {};
@@ -120,19 +127,25 @@ async function finish({ store, hub, traffic }: Deps, request: Request) {
     return Response.json({ error: "No such worktree." }, { status: 404 });
   }
   try {
-    const removed = await hub.fleet.removeWorktree(vmId, projectId, name);
+    const { removed, branch } = await hub.fleet.removeWorktree(vmId, projectId, name);
     if (removed) store.removeOpenCodeWorktree(projectId, name);
-    else store.touchOpenCodeWorktree(projectId, name);
+    else {
+      store.touchOpenCodeWorktree(projectId, name);
+      if (branch) store.setOpenCodeWorktreeBranch(projectId, name, branch);
+    }
     traffic.record({ kind: "system", operation: `OpenCode worktree ${name} ${removed ? "removed" : "kept"}`, vmId, status: "ok" });
-    return Response.json({ removed });
+    return Response.json({ removed, branch: branch ?? null });
   } catch (error) {
     traffic.record({ kind: "system", operation: `Removing OpenCode worktree ${name}: ${message(error)}`, vmId, status: "error" });
     return Response.json({ removed: false });
   }
 }
 
-/** The worktrees of the repository at `?remote=` that are still on its VMs, from what VM Bridge noted, waking none. */
-function list({ store, clones }: Deps, request: Request) {
+/**
+ * The worktrees of the repository at `?remote=` that are still on its VMs, from what VM Bridge noted, waking none. Each
+ * comes with its branch's pull request when the repository is on GitHub.
+ */
+async function list({ store, clones, githubToken }: Deps, request: Request) {
   const remote = new URL(request.url).searchParams.get("remote") ?? "";
   let project: ReturnType<Clones["find"]> = null;
   try {
@@ -140,9 +153,11 @@ function list({ store, clones }: Deps, request: Request) {
   } catch {
     // Not a remote VM Bridge can clone, so it has no project.
   }
+  const github = project ? githubName(project.url) : undefined;
+  const token = githubToken();
   const answer: OpenCodeWorktrees = {
     project: project?.title ?? null,
-    worktrees: (project ? store.openCodeWorktrees(project.id) : []).map((row) => {
+    worktrees: await Promise.all((project ? store.openCodeWorktrees(project.id) : []).map(async (row) => {
       const vm = store.vm(row.vmId);
       return {
         name: row.name,
@@ -150,11 +165,12 @@ function list({ store, clones }: Deps, request: Request) {
         base: row.base,
         vm: vm?.name ?? row.vmId,
         asleep: vm?.state !== "ready" && vm?.state !== "busy",
+        pullRequest: github && row.branch !== "HEAD" ? await fetchPullRequest(github, row.branch, token) : null,
         lastPrompt: row.lastPrompt,
         createdAt: new Date(row.createdAt).toISOString(),
         lastUsedAt: new Date(row.lastUsedAt).toISOString(),
       };
-    }),
+    })),
   };
   return Response.json(answer);
 }
