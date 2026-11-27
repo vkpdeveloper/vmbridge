@@ -995,6 +995,35 @@ printf '%s' "$base"`,
   }
 
   /**
+   * Finds a worktree `worktree` made, to open it again. Its name does not say which of the project's VMs holds it, so
+   * this looks on the awake ones first, then wakes the others in turn. Answers its VM and branch.
+   */
+  async findWorktree(projectId: string, name: string, progress: (detail: string) => void): Promise<{ vmId: string; path: string; branch: string }> {
+    const project = this.project(projectId);
+    const entries = project.vms.filter((entry) => {
+      const state = this.store.vm(entry.vmId)?.state;
+      return entry.checkoutPath && state !== "gone" && state !== "error";
+    });
+    const awake = entries.filter((entry) => this.backend(entry.vmId));
+    const asleep = entries.filter((entry) => !this.backend(entry.vmId));
+    for (const entry of worktreeName.test(name) ? [...awake, ...asleep] : []) {
+      if (!this.backend(entry.vmId)) progress(`Waking ${this.store.vm(entry.vmId)?.name ?? entry.vmId} to look for it`);
+      await this.ensure(entry.vmId);
+      const box = this.boxes.get(entry.vmId);
+      if (!box) continue;
+      const path = worktreePath(entry.checkoutPath!, name);
+      const release = this.lease(entry.vmId);
+      try {
+        const branch = await runProgram(box, `[ -d ${quote(path)} ] || exit 0\ngit -C ${quote(path)} rev-parse --abbrev-ref HEAD`, "Looking for a worktree");
+        if (branch.trim()) return { vmId: entry.vmId, path, branch: branch.trim() };
+      } finally {
+        release();
+      }
+    }
+    throw new Error(`No worktree ${name} on ${project.title}'s VMs. It may have been removed.`);
+  }
+
+  /**
    * Removes a worktree `worktree` made once nothing in it would be lost (see `removeWorktreeProgram`). It stays while an
    * OpenCode agent runs on the VM, which may be working in it, and when the VM is asleep, which is not worth waking for.
    * Answers whether it is gone.

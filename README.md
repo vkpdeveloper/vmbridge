@@ -262,6 +262,7 @@ vmbridge service install [--host] [--port]        Run in the background at login
 vmbridge service uninstall                        Remove the background service
 vmbridge password                                 Set a new dashboard password
 vmbridge opencode [--branch <name>]               Open OpenCode on a VM, in a new worktree of this repository
+vmbridge opencode --resume <id>                   Open a worktree OpenCode kept, again
 vmbridge login <pairing link>                     Sign this terminal in to VM Bridge on another computer
 ```
 
@@ -293,7 +294,8 @@ the default branch.
 It needs an OpenCode API key in **Accounts** and OpenCode 2 on your computer
 (`npm install -g @opencode/cli`). On the computer VM Bridge runs on, the command signs itself in; on
 another, run `vb login` once with a pairing link from **Devices**. When you close OpenCode, the
-worktree is removed unless it has changes or commits that are not pushed.
+worktree is removed unless it has changes or commits that are not pushed. A kept worktree opens again,
+with its sessions, with `vb opencode --resume <id>`; the command prints the line to run.
 
 To connect an OpenCode app yourself, choose **Connect OpenCode** next to a repository on the
 dashboard.

@@ -188,7 +188,7 @@ export const copy = {
       "Add an OpenCode API key in Accounts first. OpenCode on the VMs uses its models.",
       "It needs OpenCode 2 on this computer: npm install -g @opencode/cli.",
       "Each run gets its own worktree on a new opencode/ branch, from your current branch if origin has it, else the default branch. --branch picks another.",
-      "When you close OpenCode, the worktree goes, unless it has changes or commits that are not pushed.",
+      "When you close OpenCode, the worktree goes, unless it has changes or commits that are not pushed. Then it prints the command that opens it again: vb opencode --resume <id>.",
       "On the computer VM Bridge runs on, it signs itself in. On another, run vb login once with a pairing link from Devices.",
       "vb is a short name for vmbridge.",
     ],

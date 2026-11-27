@@ -81,7 +81,7 @@ function checkOpenCode() {
   return found!;
 }
 
-function launch(signIn: SignIn, body: { remote: string; branch: string | null }) {
+function launch(signIn: SignIn, body: { remote: string; branch: string | null; resume: string | null }) {
   return fetch(new URL("/api/vmbridge/opencode", signIn.url), {
     method: "POST",
     headers: { authorization: `Bearer ${signIn.token}`, "content-type": "application/json" },
@@ -108,7 +108,8 @@ async function follow(response: Response) {
       else if ("notice" in event) console.log(`${at()}  Note: ${event.notice}`);
       else if ("error" in event) throw new Error(event.error);
       else {
-        console.log(`${at()}  Ready: ${event.ready.branch} from ${event.ready.base} on ${event.ready.vm}\n`);
+        const { branch, base, vm } = event.ready;
+        console.log(`${at()}  Ready: ${branch}${base ? ` from ${base}` : ""} on ${vm}\n`);
         return event.ready;
       }
     }
@@ -118,14 +119,15 @@ async function follow(response: Response) {
 
 /**
  * Finds or adds this repository's project, has VM Bridge make a worktree on one of its VMs and start OpenCode there,
- * then opens OpenCode's terminal app on it. The worktree starts from the current branch when origin has it.
+ * then opens OpenCode's terminal app on it. The worktree starts from the current branch when origin has it. `resume`
+ * opens a worktree that was kept, by its name, instead of making one.
  */
-export async function openCode(options: { branch?: string }) {
+export async function openCode(options: { branch?: string; resume?: string }) {
   const root = git(["rev-parse", "--show-toplevel"]);
   if (!root) throw new Error("Run this inside a git repository.");
   const remote = git(["remote", "get-url", "origin"], root);
   if (!remote) throw new Error("This repository has no `origin` remote, so a VM cannot clone it.");
-  const body = { remote, branch: options.branch ?? (git(["branch", "--show-current"], root) || null) };
+  const body = { remote, branch: options.branch ?? (git(["branch", "--show-current"], root) || null), resume: options.resume ?? null };
   const opencode = checkOpenCode();
 
   let session = signIn();
@@ -159,5 +161,8 @@ export async function openCode(options: { branch?: string }) {
     .then((response) => (response.ok ? (response.json() as Promise<{ removed: boolean }>) : null))
     .catch(() => null);
   if (answer?.removed) console.log(`Removed the worktree ${ready.branch}.`);
-  else console.log(`Kept the worktree ${ready.branch} at ${ready.directory} on ${ready.vm}: it has work that is not pushed, or an agent is still running.`);
+  else {
+    console.log(`Kept the worktree ${ready.branch} at ${ready.directory} on ${ready.vm}: it has work that is not pushed, or an agent is still running.`);
+    console.log(`Open it again with: vb opencode --resume ${ready.name}`);
+  }
 }

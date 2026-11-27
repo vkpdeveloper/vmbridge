@@ -713,8 +713,8 @@ export type OpenCodeLaunchEvent =
         /** The worktree on the VM. */
         directory: string;
         branch: string;
-        /** The branch the worktree started from. */
-        base: string;
+        /** The branch the worktree started from, or null when it was opened again. */
+        base: string | null;
       };
     };
 

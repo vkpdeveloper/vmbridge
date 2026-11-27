@@ -18,6 +18,7 @@ Usage:
   vmbridge service uninstall                           Remove the background service
   vmbridge password                                    Set a new dashboard password
   vmbridge opencode [--branch <name>]                  Open OpenCode on a VM, in a new worktree of this repository
+  vmbridge opencode --resume <id>                      Open a worktree OpenCode kept, again
   vmbridge login <pairing link>                        Sign this terminal in to VM Bridge on another machine
 
 \`vb\` is a short name for \`vmbridge\`.
@@ -198,6 +199,7 @@ async function main() {
       port: { type: "string" },
       check: { type: "boolean" },
       branch: { type: "string" },
+      resume: { type: "string" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
     },
@@ -216,7 +218,7 @@ async function main() {
     case "password":
       return ensureKey({ force: true });
     case "opencode":
-      return openCode({ branch: values.branch });
+      return openCode({ branch: values.branch, resume: values.resume });
     case "login":
       return login(subcommand);
     case "service":

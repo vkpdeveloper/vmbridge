@@ -28,13 +28,15 @@ export function openCodeLauncher(deps: Deps) {
 
 /**
  * Finds or adds the project for `remote`, places it on a VM as a new thread would be, makes a worktree there and starts
- * OpenCode. The answer is a stream of JSON lines, one per step, so the terminal shows each as it happens. The last
- * line has the OpenCode address under this server and its password, or the error.
+ * OpenCode. With `resume`, it opens that worktree again instead. The answer is a stream of JSON lines, one per step, so
+ * the terminal shows each as it happens. The last line has the OpenCode address under this server and its password, or
+ * the error.
  */
 async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Request) {
-  const body = (await request.json().catch(() => null)) as { remote?: unknown; branch?: unknown } | null;
+  const body = (await request.json().catch(() => null)) as { remote?: unknown; branch?: unknown; resume?: unknown } | null;
   const remote = typeof body?.remote === "string" ? body.remote : "";
   const branch = typeof body?.branch === "string" && branchName(body.branch) ? body.branch : null;
+  const resume = typeof body?.resume === "string" ? body.resume : null;
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -50,17 +52,25 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
       try {
         if (!hasKey()) throw new NoOpenCodeKey();
         const project = clones.add(remote);
-        send({ step: `Finding a VM for ${project.title}` });
         let password = store.openCodePassword(project.id);
         if (!password) {
           password = newToken();
           store.setOpenCodePassword(project.id, password);
         }
-        const placement = await hub.placeOpenCode(project.id, (step) => send({ step }));
-        vmId = placement.vmId;
-        if (placement.notice) send({ notice: placement.notice });
-        send({ step: "Making a worktree" });
-        const worktree = await hub.fleet.worktree(vmId, project.id, branch);
+        let worktree: { name: string; path: string; branch: string; base: string | null };
+        if (resume) {
+          send({ step: `Finding the worktree ${resume}` });
+          const found = await hub.fleet.findWorktree(project.id, resume, (step) => send({ step }));
+          vmId = found.vmId;
+          worktree = { ...found, name: resume, base: null };
+        } else {
+          send({ step: `Finding a VM for ${project.title}` });
+          const placement = await hub.placeOpenCode(project.id, (step) => send({ step }));
+          vmId = placement.vmId;
+          if (placement.notice) send({ notice: placement.notice });
+          send({ step: "Making a worktree" });
+          worktree = await hub.fleet.worktree(vmId, project.id, branch);
+        }
         send({ step: "Starting OpenCode" });
         await hub.fleet.opencode(vmId);
         traffic.record({ kind: "system", operation: `OpenCode worktree for ${project.title}`, vmId, status: "ok", durationMs: Math.round(performance.now() - started) });
