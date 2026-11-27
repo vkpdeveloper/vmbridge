@@ -28,6 +28,8 @@ type FleetEvents = {
   offline: [vmId: string];
   /** VM Bridge started waking a VM (`fromSleep`), or connecting again to one that kept running. `awake` or `wakeFailed` follows. */
   waking: [vmId: string, fromSleep: boolean];
+  /** What a wake or reconnect started with `waking` is doing now, in a few plain words. */
+  wakeDetail: [vmId: string, detail: string];
   /** A wake or reconnect started with `waking` failed. */
   wakeFailed: [vmId: string, reason: string];
   /** Anything the dashboard shows about the fleet changed. */
@@ -370,6 +372,20 @@ export class Fleet extends EventEmitter<FleetEvents> {
     return flight;
   }
 
+  /** `ensure`, passing on what the wake is doing to `detail` while it runs, even when another caller started it. */
+  private async ensureTelling(vmId: string, detail?: (text: string) => void) {
+    if (!detail) return this.ensure(vmId);
+    const forward = (id: string, text: string) => {
+      if (id === vmId) detail(text);
+    };
+    this.on("wakeDetail", forward);
+    try {
+      return await this.ensure(vmId);
+    } finally {
+      this.off("wakeDetail", forward);
+    }
+  }
+
   private async open(vmId: string): Promise<Backend> {
     if (this.closed) throw new Error("VM Bridge is stopping.");
     const ready = this.backend(vmId);
@@ -396,6 +412,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
     version.catch(() => {});
     try {
       const driver = this.driver(vm.provider);
+      this.emit("wakeDetail", vmId, `Waiting for ${providers[vm.provider].label}`);
       box = await driver.wake({
         key: vm.id,
         size: vm.size,
@@ -465,6 +482,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
     }
     const credentials = await this.credentials(vm.provider);
     const fingerprint = credentialsFingerprint(credentials, this.store.encryption);
+    this.emit("wakeDetail", vm.id, "Preparing the VM");
     const [prepared, preview] = await Promise.all([prepareVm(box, version, credentials, fingerprint), box.preview(t3Port)]);
     watch.lap("prepare VM, preview URL");
     if (prepared.codexAuth) {
@@ -489,6 +507,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
         },
       );
     }
+    this.emit("wakeDetail", vm.id, "Starting T3");
     let server = await startT3(box, vm.t3Token, restart, prepared.t3);
     watch.lap("start T3, session");
     if (server.descriptor.orchestrationProtocolVersion !== 2) {
@@ -496,6 +515,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
     }
     if (restart && server.credentials !== fingerprint) this.unrestartable.set(vm.id, fingerprint);
     let backend = new Backend(vm.id, preview, server.token, this.openSocket);
+    this.emit("wakeDetail", vm.id, "Waiting for T3 to answer");
     try {
       try {
         await backend.connect();
@@ -506,6 +526,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
         await backend.connect();
       }
       watch.lap("open T3 socket");
+      this.emit("wakeDetail", vm.id, "Reading T3's settings");
       this.store.updateVm(vm.id, { t3Token: server.token, t3Version: version, t3Credentials: server.credentials, lastConnectedAt: Date.now() });
       await this.onConnect(vm.id, backend);
       watch.lap("read T3 config");
@@ -719,14 +740,14 @@ export class Fleet extends EventEmitter<FleetEvents> {
    * OpenCode on an awake VM, started in its project's checkout on first use. It is never woken for: callers `ensure`
    * the VM first. A failed start is not kept, so the next request tries again.
    */
-  async opencode(vmId: string): Promise<OpenCodeServer> {
+  async opencode(vmId: string, detail: (text: string) => void = () => {}): Promise<OpenCodeServer> {
     const cached = this.opencodes.get(vmId);
     const server = await cached?.catch(() => null);
     if (server && !server.expiring) return server;
     if (cached && this.opencodes.get(vmId) === cached) this.opencodes.delete(vmId);
     let flight = this.opencodes.get(vmId);
     if (!flight) {
-      flight = this.exclusive(vmId, () => this.startOpenCode(vmId));
+      flight = this.exclusive(vmId, () => this.startOpenCode(vmId, detail));
       this.opencodes.set(vmId, flight);
       const started = flight;
       started.catch(() => {
@@ -743,7 +764,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
     }, () => {});
   }
 
-  private async startOpenCode(vmId: string): Promise<OpenCodeServer> {
+  private async startOpenCode(vmId: string, detail: (text: string) => void): Promise<OpenCodeServer> {
     const vm = this.store.vm(vmId);
     const box = this.box(vmId);
     if (!vm || !box) throw new Error(`VM ${vmId} is not awake.`);
@@ -753,7 +774,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
     if (!vm.opencodePassword) this.store.updateVm(vmId, { opencodePassword: password });
     const started = performance.now();
     try {
-      await startOpenCode(box, password, checkout);
+      await startOpenCode(box, password, checkout, detail);
       const driver = this.driver(vm.provider);
       const preview = await (driver.preview ? driver.preview(box, opencodePort) : box.preview(opencodePort));
       this.traffic.record({ kind: "provider", operation: "start OpenCode", vmId, status: "ok", durationMs: Math.round(performance.now() - started) });
@@ -855,11 +876,13 @@ export class Fleet extends EventEmitter<FleetEvents> {
       load: (vm: VmRow) => VmLoad;
       placed: (vmId: string) => void;
       progress: (detail: string) => void;
+      /** What the current step is doing now, while a VM wakes. */
+      detail?: (text: string) => void;
     },
   ): Promise<ThreadPlacement> {
-    const { only, load, placed, progress } = options;
+    const { only, load, placed, progress, detail } = options;
     return this.exclusive(`project:${projectId}`, async () => {
-      const primary = await this.placePrimary(projectId, progress);
+      const primary = await this.placePrimary(projectId, progress, detail);
       // VMs that failed to wake or set up during this placement.
       const failed = new Set<string>();
       for (;;) {
@@ -880,7 +903,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
           let vmId: string | undefined;
           try {
             vmId = await this.addVm(project, progress, { ...target, discardOnError: true });
-            await this.setUp(vmId, projectId, progress);
+            await this.setUp(vmId, projectId, progress, detail);
             this.overflowFailedAt.delete(projectId);
             placed(vmId);
             return { vmId, notice: null };
@@ -894,7 +917,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
         const { vmId } = choice.load;
         if (!choice.load.awake || !project.vms.find((entry) => entry.vmId === vmId)?.checkoutPath) {
           try {
-            await this.setUp(vmId, projectId, progress);
+            await this.setUp(vmId, projectId, progress, detail);
           } catch (error) {
             // Nothing to fall back to from the primary: fail the launch as before. A spent budget refuses every wake.
             if (vmId === primary || error instanceof BudgetReached) throw error;
@@ -914,12 +937,12 @@ export class Fleet extends EventEmitter<FleetEvents> {
     return project;
   }
 
-  private async placePrimary(projectId: string, progress: (detail: string) => void): Promise<string> {
+  private async placePrimary(projectId: string, progress: (detail: string) => void, detail?: (text: string) => void): Promise<string> {
     const project = this.project(projectId);
     const primary = primaryVm(project);
     if (primary?.checkoutPath) return primary.vmId;
     const vmId = primary?.vmId ?? (await this.addVm(project, progress, this.placement(project.url)));
-    await this.setUp(vmId, projectId, progress);
+    await this.setUp(vmId, projectId, progress, detail);
     return vmId;
   }
 
@@ -941,11 +964,11 @@ export class Fleet extends EventEmitter<FleetEvents> {
   }
 
   /** Wakes one of a project's VMs and makes sure it holds the checkout and T3 knows the project. */
-  private async setUp(vmId: string, projectId: string, progress: (detail: string) => void) {
+  private async setUp(vmId: string, projectId: string, progress: (detail: string) => void, detail?: (text: string) => void) {
     const project = this.project(projectId);
-    const awake = Boolean(this.backend(vmId));
-    if (!awake) progress(this.store.vm(vmId)?.state === "sleeping" ? "Waking a VM" : "Starting the VM");
-    const backend = await this.ensure(vmId);
+    const vm = this.store.vm(vmId);
+    if (!this.backend(vmId)) progress(`${vm?.state === "sleeping" ? "Waking" : "Starting"} ${vm ? `${vm.name} on ${providers[vm.provider].label}` : "the VM"}`);
+    const backend = await this.ensureTelling(vmId, detail);
     if (project.vms.find((entry) => entry.vmId === vmId)?.checkoutPath) return;
     const release = this.lease(vmId);
     try {
@@ -998,7 +1021,12 @@ printf '%s' "$base"`,
    * Finds a worktree `worktree` made, to open it again. Its name does not say which of the project's VMs holds it, so
    * this looks on the awake ones first, then wakes the others in turn. Answers its VM and branch.
    */
-  async findWorktree(projectId: string, name: string, progress: (detail: string) => void): Promise<{ vmId: string; path: string; branch: string }> {
+  async findWorktree(
+    projectId: string,
+    name: string,
+    progress: (detail: string) => void,
+    detail?: (text: string) => void,
+  ): Promise<{ vmId: string; path: string; branch: string }> {
     const project = this.project(projectId);
     const entries = project.vms.filter((entry) => {
       const state = this.store.vm(entry.vmId)?.state;
@@ -1008,7 +1036,7 @@ printf '%s' "$base"`,
     const asleep = entries.filter((entry) => !this.backend(entry.vmId));
     for (const entry of worktreeName.test(name) ? [...awake, ...asleep] : []) {
       if (!this.backend(entry.vmId)) progress(`Waking ${this.store.vm(entry.vmId)?.name ?? entry.vmId} to look for it`);
-      await this.ensure(entry.vmId);
+      await this.ensureTelling(entry.vmId, detail);
       const box = this.boxes.get(entry.vmId);
       if (!box) continue;
       const path = worktreePath(entry.checkoutPath!, name);

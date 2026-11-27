@@ -96,7 +96,8 @@ export class NoOpenCodeKey extends Error {
 }
 
 /** Starts OpenCode in `cwd` unless it answers already, installing it first if the VM lacks it. */
-export async function startOpenCode(box: Box, password: string, cwd: string) {
+export async function startOpenCode(box: Box, password: string, cwd: string, detail: (text: string) => void = () => {}) {
+  detail("Checking OpenCode on the VM");
   const state = (
     await runProgram(
       box,
@@ -116,6 +117,7 @@ export async function startOpenCode(box: Box, password: string, cwd: string) {
   ).trim();
   if (state === "nokey") throw new NoOpenCodeKey();
   if (state === "idle" || state === "busy") return;
+  detail("Starting the OpenCode server");
   // A server from before is running with another password, or is OpenCode 1. Restarted, it runs this start script.
   if (state === "refused" || state === "old") await box.process(processName).restart();
   else {
@@ -127,6 +129,7 @@ export async function startOpenCode(box: Box, password: string, cwd: string) {
       await box.process(processName).restart();
     }
   }
+  detail("Waiting for OpenCode to answer");
   await runProgram(box, `. ${root}/env\n${waitScript}`, "Starting OpenCode", 150_000);
 }
 

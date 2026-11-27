@@ -4,6 +4,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import type { OpenCodeLaunchEvent } from "@vmbridge/contracts";
 import { databasePath, dataDir, defaultPort, pairThisMachine, tokenExchange } from "@vmbridge/server";
+import { launchView, type LaunchView } from "./launch-view.ts";
 
 interface SignIn {
   url: string;
@@ -91,30 +92,31 @@ function launch(signIn: SignIn, body: { remote: string; branch: string | null; r
   });
 }
 
-/** Reads the launch's JSON lines as they come, printing each step with the seconds since the start. */
-async function follow(response: Response) {
-  const started = Date.now();
-  const at = () => `${Math.round((Date.now() - started) / 1000)}s`.padStart(4);
+/** Reads the launch's JSON lines as they come and shows each on `view`. Answers the ready event. */
+async function follow(response: Response, view: LaunchView) {
   const decoder = new TextDecoder();
   let buffer = "";
-  for await (const chunk of response.body!) {
-    buffer += decoder.decode(chunk, { stream: true });
-    for (let end = buffer.indexOf("\n"); end >= 0; end = buffer.indexOf("\n")) {
-      const line = buffer.slice(0, end);
-      buffer = buffer.slice(end + 1);
-      if (!line) continue;
-      const event = JSON.parse(line) as OpenCodeLaunchEvent;
-      if ("step" in event) console.log(`${at()}  ${event.step}`);
-      else if ("notice" in event) console.log(`${at()}  Note: ${event.notice}`);
-      else if ("error" in event) throw new Error(event.error);
-      else {
-        const { branch, base, vm } = event.ready;
-        console.log(`${at()}  Ready: ${branch}${base ? ` from ${base}` : ""} on ${vm}\n`);
-        return event.ready;
+  try {
+    for await (const chunk of response.body!) {
+      buffer += decoder.decode(chunk, { stream: true });
+      for (let end = buffer.indexOf("\n"); end >= 0; end = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, end);
+        buffer = buffer.slice(end + 1);
+        if (!line) continue;
+        const event = JSON.parse(line) as OpenCodeLaunchEvent;
+        if ("error" in event) throw new Error(event.error);
+        if ("ready" in event) {
+          view.ready(event.ready);
+          return event.ready;
+        }
+        view.update(event);
       }
     }
+    throw new Error("VM Bridge stopped answering before OpenCode was ready.");
+  } catch (error) {
+    view.fail();
+    throw error;
   }
-  throw new Error("VM Bridge stopped answering before OpenCode was ready.");
 }
 
 /**
@@ -139,7 +141,8 @@ export async function openCode(options: { branch?: string; resume?: string }) {
     response = await launch(session, body);
   }
   if (!response.ok) throw new Error(`VM Bridge answered ${response.status}.`);
-  const ready = await follow(response);
+  // The steps every launch ends with, shown as waiting until they start. They match the server's step names.
+  const ready = await follow(response, launchView(process.stdout, body.resume ? ["Starting OpenCode"] : ["Making a worktree", "Starting OpenCode"]));
 
   // OpenCode runs here, in this repository's folder. The VM has no such folder, so OpenCode works in the worktree.
   const child = Bun.spawn([opencode, "--server", new URL(ready.path, session.url).toString()], {

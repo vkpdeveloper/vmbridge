@@ -697,6 +697,8 @@ export interface OpenCodeConnection {
 /** One line of `POST /api/vmbridge/opencode`'s answer, for `vmbridge opencode`: a step, a warning, then ready or an error. */
 export type OpenCodeLaunchEvent =
   | { step: string }
+  /** What the current step is doing now, such as which part of a wake. The next step replaces it. */
+  | { detail: string }
   | { notice: string }
   | { error: string }
   | {

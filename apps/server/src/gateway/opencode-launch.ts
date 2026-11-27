@@ -47,6 +47,8 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
           // The terminal went away. The steps already running finish, and the worktree stays for next time.
         }
       };
+      const step = (text: string) => send({ step: text });
+      const detail = (text: string) => send({ detail: text });
       const started = performance.now();
       let vmId: string | undefined;
       try {
@@ -59,20 +61,20 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
         }
         let worktree: { name: string; path: string; branch: string; base: string | null };
         if (resume) {
-          send({ step: `Finding the worktree ${resume}` });
-          const found = await hub.fleet.findWorktree(project.id, resume, (step) => send({ step }));
+          step(`Finding the worktree ${resume}`);
+          const found = await hub.fleet.findWorktree(project.id, resume, step, detail);
           vmId = found.vmId;
           worktree = { ...found, name: resume, base: null };
         } else {
-          send({ step: `Finding a VM for ${project.title}` });
-          const placement = await hub.placeOpenCode(project.id, (step) => send({ step }));
+          step(`Finding a VM for ${project.title}`);
+          const placement = await hub.placeOpenCode(project.id, step, detail);
           vmId = placement.vmId;
           if (placement.notice) send({ notice: placement.notice });
-          send({ step: "Making a worktree" });
+          step("Making a worktree");
           worktree = await hub.fleet.worktree(vmId, project.id, branch);
         }
-        send({ step: "Starting OpenCode" });
-        await hub.fleet.opencode(vmId);
+        step("Starting OpenCode");
+        await hub.fleet.opencode(vmId, detail);
         traffic.record({ kind: "system", operation: `OpenCode worktree for ${project.title}`, vmId, status: "ok", durationMs: Math.round(performance.now() - started) });
         send({
           ready: {

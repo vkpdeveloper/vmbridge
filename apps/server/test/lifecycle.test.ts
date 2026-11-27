@@ -550,6 +550,22 @@ describe("placing new threads", () => {
     await expect(placeThread()).rejects.toThrow("VM Bridge reached this month's budget.");
   });
 
+  test("waking a VM for a placement says which VM, and what the wake is doing as it goes", async () => {
+    const { primary, fleet, store } = await placed();
+    await fleet.sleep(primary);
+    await Bun.sleep(2);
+    const steps: string[] = [];
+    const details: string[] = [];
+    await fleet.placeThread("p1", {
+      load: (vm): VmLoad => ({ vmId: vm.id, awake: Boolean(fleet.backend(vm.id)), turns: 0, vcpus: 2, memory: null, disk: null }),
+      placed: () => {},
+      progress: (step) => steps.push(step),
+      detail: (text) => details.push(text),
+    });
+    expect(steps).toEqual([`Waking ${store.vm(primary)!.name} on boxd`]);
+    expect(details).toEqual(["Waiting for boxd", "Preparing the VM", "Starting T3", "Waiting for T3 to answer", "Reading T3's settings"]);
+  });
+
   test("a sleeping VM with room is woken before a new one is made", async () => {
     const { primary, turns, fleet, events, placeThread } = await placed();
     turns.set(primary, 4);

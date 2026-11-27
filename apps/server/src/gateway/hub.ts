@@ -1057,8 +1057,9 @@ export class Hub extends EventEmitter<HubEvents> {
    * The VM for a new OpenCode worktree, placed as a new top-level thread is. It counts toward that VM's load until
    * placement forgets new launches, as OpenCode's sessions are not T3's to report.
    */
-  placeOpenCode(projectId: string, progress: (detail: string) => void) {
+  placeOpenCode(projectId: string, progress: (step: string) => void, detail: (text: string) => void) {
     return this.fleet.placeThread(projectId, {
+      detail,
       load: (vm) => this.load(vm),
       placed: (vmId) => this.launches.set(`opencode:${crypto.randomUUID()}`, { vmId, at: Date.now() }),
       progress,
