@@ -56,6 +56,7 @@ import { cn } from "@/lib/utils";
 import { ago, api, useTick } from "./api.ts";
 import { AgentLogo, Logo, ProjectIcon, ProviderLogo } from "./brand.tsx";
 import { CopyButton } from "./CopyButton.tsx";
+import { ConnectOpenCode } from "./OpenCode.tsx";
 
 /** A connection animates while it carried a request this recently. */
 const flowWindowMs = 8_000;
@@ -841,10 +842,13 @@ function VmDetails({ vm, overview, now, onClose }: { vm: VmInfo; overview: Overv
                 <ItemMedia>
                   <ProjectIcon icon={project.icon} className="size-5" />
                 </ItemMedia>
-                <ItemContent>
+                <ItemContent className="min-w-0">
                   <ItemTitle>{project.title}</ItemTitle>
                   {project.branch && <ItemDescription className="font-mono text-xs">{project.branch}</ItemDescription>}
                 </ItemContent>
+                <ItemActions>
+                  <ConnectOpenCode project={project} />
+                </ItemActions>
               </Item>
             ))}
           </ItemGroup>
