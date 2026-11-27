@@ -62,7 +62,8 @@ export function ConnectOpenCode({ project }: { project: ProjectInfo }) {
           Connect OpenCode
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-lg">
+      {/* One column that never grows past the dialog, so long addresses truncate. With every address and the QR code it can be taller than a phone, so it scrolls. */}
+      <DialogContent className="max-h-[calc(100dvh-2rem)] grid-cols-1 overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Connect OpenCode</DialogTitle>
           <DialogDescription>
