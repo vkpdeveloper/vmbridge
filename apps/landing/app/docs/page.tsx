@@ -35,6 +35,7 @@ const groups: DocsGroup[] = [
       { id: "run", title: "Run" },
       { id: "setup", title: "Set up the dashboard" },
       { id: "pair", title: "Pair T3 Code" },
+      { id: "opencode", title: copy.opencode.title },
     ],
   },
   {
@@ -327,6 +328,18 @@ bun run compile        # dist/vmbridge
                   "Remove a device under Settings, Devices to sign it out right away.",
                 ]}
               />
+            </Section>
+
+            <Section id="opencode" title={copy.opencode.title}>
+              <p>{copy.opencode.body}</p>
+              <ol className="list-decimal space-y-2 pl-5">
+                {copy.opencode.steps.map((step) => (
+                  <li key={step}>{step}</li>
+                ))}
+              </ol>
+              <p>{copy.opencode.terminal}</p>
+              <Command text={copy.opencode.command} />
+              <List items={[...copy.opencode.notes]} />
             </Section>
 
             <Section id="flow" title="How a request flows">
