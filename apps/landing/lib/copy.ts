@@ -175,6 +175,29 @@ export const copy = {
     stuck: "Still stuck?",
     stuckBody: "The FAQ answers the common questions. Anything else, open an issue on GitHub.",
   },
+  /** The docs section on connecting OpenCode, which reads every line from here. */
+  opencode: {
+    /** 30 */
+    title: "Use with OpenCode",
+    /** 200 */
+    body: "OpenCode connects to VM Bridge like any OpenCode server. Each project gets its own address and password, and its agents run on the project's VM.",
+    /** The steps, in order. */
+    steps: [
+      "Add an OpenCode API key in Accounts. OpenCode on the VMs uses its models.",
+      "Open a VM on the dashboard and choose Connect OpenCode next to its repository.",
+      "In the OpenCode app, choose Connect to a server and paste the address and password.",
+    ],
+    /** 80. Before the terminal command. */
+    terminal: "In a terminal, put the password in OPENCODE_PASSWORD and run:",
+    /** With an example of the address the dashboard shows. */
+    command: "opencode --server https://bridge.example.com/opencode/<project>",
+    notes: [
+      "The first request wakes the VM. If OpenCode gives up while it wakes, connect again.",
+      "Agents keep running after OpenCode closes. The VM sleeps once no OpenCode agent is running and nothing has used it for the idle time.",
+      "New password, in the same dialog, signs out every OpenCode client of that project.",
+      "OpenCode uses only the OpenCode key. Codex and Claude sign-ins stay with T3 Code.",
+    ],
+  },
   faq: {
     /** 40 */
     title: "Questions",
