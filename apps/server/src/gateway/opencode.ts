@@ -3,7 +3,7 @@ import { BudgetReached } from "../budget.ts";
 import { message, NoProvider, type Fleet } from "../fleet.ts";
 import { primaryVm, type Store } from "../store.ts";
 import type { Traffic } from "../traffic.ts";
-import { NoOpenCodeKey, OpenCodeUnreachable, type OpenCodeServer } from "../vm/opencode.ts";
+import { cliVersion, NoOpenCodeKey, OpenCodeUnreachable, type OpenCodeServer } from "../vm/opencode.ts";
 import type { Viewer, WatchUpgrade } from "../watch/watch.ts";
 import { previewRelay } from "./preview.ts";
 
@@ -15,6 +15,17 @@ import { previewRelay } from "./preview.ts";
 export const openCodePrefix = "/opencode/";
 
 const retryAfterSeconds = 10;
+/**
+ * OpenCode's clients check a server with `GET /api/info` and give up after about 5 seconds, which a sleeping VM never
+ * makes. Past this, VM Bridge answers for it while the VM wakes. The client's next requests wait for the VM, and it asks
+ * again once the VM is up.
+ */
+const infoWaitMs = 3_000;
+const wakingInfo = () =>
+  Response.json(
+    { version: cliVersion, pid: 0, hostname: "VM Bridge", urls: [], paths: { tmp: "/tmp/opencode" }, capabilities: { persistentPty: true } },
+    { headers: { "cache-control": "no-store" } },
+  );
 /** Typing in a terminal counts as activity, but the VM's row is written at most this often for it. */
 const touchEveryMs = 10_000;
 
@@ -153,8 +164,11 @@ export class OpenCodeGateway {
     private readonly traffic: Traffic,
     /** Whether VM Bridge has an OpenCode key to give VMs. OpenCode is not started without one. */
     private readonly hasKey: () => boolean,
-    /** How long a request waits for its VM to wake and OpenCode to start before it is told to try again. */
-    private readonly wakeWaitMs = 25_000,
+    /**
+     * How long a request waits for its VM to wake and OpenCode to start before it is told to try again. OpenCode's
+     * clients wait as long as it takes, so this is just under the 100 seconds Cloudflare's tunnel waits for an answer.
+     */
+    private readonly wakeWaitMs = 90_000,
   ) {
     fleet.on("offline", (vmId) => this.end(vmId, "The VM went to sleep"));
   }
@@ -304,8 +318,9 @@ export class OpenCodeGateway {
     if (waking) ready = this.wake(project.id);
     else if (primary && this.fleet.backend(primary)) ready = this.fleet.opencode(primary).then((server) => ({ vmId: primary, server }));
     else return tryAgain("This project's VM is asleep. Send a request to wake it.");
-    const found = await within(ready, this.wakeWaitMs);
-    if (!found) return tryAgain("This project's VM is waking. Try again in a moment.");
+    const info = waking && request.method === "GET" && pathname === "/api/info";
+    const found = await within(ready, info ? Math.min(infoWaitMs, this.wakeWaitMs) : this.wakeWaitMs);
+    if (!found) return info ? wakingInfo() : tryAgain("This project's VM is waking. Try again in a moment.");
     // A new password while this waited ended only the connections open then, so this one is checked again.
     if (signedIn && !this.accepts(project.id, password)) {
       seen.refusal = "wrong password";

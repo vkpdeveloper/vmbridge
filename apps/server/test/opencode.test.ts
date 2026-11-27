@@ -188,6 +188,17 @@ describe("OpenCode gateway", () => {
     expect(asked).toEqual([]);
   });
 
+  test("answers OpenCode's health check itself while the VM wakes, so the client does not give up", async () => {
+    const { gateway, calls } = setup({ awake: false, wakeMs: 300, wakeWaitMs: 50 });
+    const auth = { headers: { authorization: basic(projectPassword) } };
+    const response = await send(gateway, "/opencode/p1/api/info", auth);
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { version: string }).version).toStartWith("2.");
+    expect(asked).toEqual([]);
+    // The wake goes on.
+    expect(calls.ensure).toBe(1);
+  });
+
   test("an event stream does not wake a sleeping VM", async () => {
     const { gateway, calls } = setup({ awake: false });
     const response = await send(gateway, "/opencode/p1/api/event", { headers: { authorization: basic(projectPassword) } });

@@ -15,7 +15,7 @@ const processName = "opencode";
  * OpenCode's clients speak its 2.x API, which npm ships as @opencode/cli. npm's opencode-ai is the 1.x line, which
  * T3's own OpenCode agent keeps using, so this one gets its own folder.
  */
-const cliVersion = "2.4.2";
+export const cliVersion = "2.4.2";
 const cliPrefix = `${dir}/cli`;
 const cli = `${cliPrefix}/bin/opencode`;
 const installCli = `${cli} --version 2>/dev/null | grep -qxF "opencode v${cliVersion}" || npm install -g --prefix ${cliPrefix} --no-audit --no-fund --loglevel=error @opencode/cli@${cliVersion} >&2`;
