@@ -41,7 +41,7 @@ import type { Budget } from "./budget.ts";
 import { envNameProblem, envValueProblem } from "./vm/runtime.ts";
 import type { SkillsState } from "./vm/skills.ts";
 import type { Stats } from "./vm/stats.ts";
-import type { Watch } from "./watch/watch.ts";
+import { addressPreference, type Watch } from "./watch/watch.ts";
 
 /**
  * Where VM Bridge is reached, and the settings for it. Bun's covers loopback, Tailscale, the local network and
@@ -268,8 +268,8 @@ export class Admin {
       if (!file) return json({ error: "This project has no logo." }, 404);
       return new Response(file, { headers: keptIconHeaders(file.type) });
     }
-    // A project's OpenCode address and password, made the first time. `renew` makes a new password and ends the
-    // connections that used the old one.
+    // A project's OpenCode address and password, made the first time, and a new pairing code for a QR code. `renew`
+    // makes a new password and ends the connections and pairing codes that used the old one.
     if (section === "projects" && id && action === "opencode" && method === "POST") {
       if (!store.project(id)) return json({ error: "Not found." }, 404);
       const renew = (await body(request)).renew === true;
@@ -281,7 +281,10 @@ export class Admin {
       }
       const { addresses } = await this.deps.network.info(request);
       const urls = addresses.map((address) => ({ ...address, url: `${address.url}${openCodePrefix}${id}` }));
-      return json({ urls, password } satisfies OpenCodeConnection);
+      // A phone cannot reach this machine's loopback address. The one most devices can reach goes first, as clients keep it.
+      const reachable = addressPreference.flatMap((kind) => (kind === "local" ? [] : urls.filter((url) => url.kind === kind)));
+      const pairing = reachable.length > 0 ? { ...this.deps.opencode.pairingCode(id), urls: reachable.map((url) => url.url) } : null;
+      return json({ urls, password, pairing } satisfies OpenCodeConnection);
     }
     if (section === "network" && id && !action && method === "POST") {
       const changed = await this.deps.network.change(id, await body(request));

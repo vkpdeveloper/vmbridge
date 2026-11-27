@@ -130,6 +130,27 @@ describe("OpenCode gateway", () => {
     expect(asked).toEqual([]);
   });
 
+  test("a pairing code trades once for the project's password, at that project's address only", async () => {
+    const { gateway } = setup();
+    const { code } = gateway.pairingCode("p1");
+    expect(code).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect((await send(gateway, `/opencode/p2/auth/connect/${code}`)).status).toBe(401);
+    const response = await send(gateway, `/opencode/p1/auth/connect/${code}`, { headers: { origin: "https://app.opencode.test" } });
+    expect(response.headers.get("access-control-allow-origin")).toBe("https://app.opencode.test");
+    expect(await response.json()).toEqual({ token: projectPassword });
+    // OpenCode's clients read a 401 as an expired link.
+    expect((await send(gateway, `/opencode/p1/auth/connect/${code}`)).status).toBe(401);
+    expect((await send(gateway, "/opencode/p1/auth/connect/made-up")).status).toBe(401);
+    expect(asked).toEqual([]);
+  });
+
+  test("a new password ends the pairing codes made before it", async () => {
+    const { gateway } = setup();
+    const { code } = gateway.pairingCode("p1");
+    gateway.disconnect("p1");
+    expect((await send(gateway, `/opencode/p1/auth/connect/${code}`)).status).toBe(401);
+  });
+
   test("holds a request while the VM wakes", async () => {
     const { gateway, calls } = setup({ awake: false, wakeMs: 100 });
     const response = await send(gateway, "/opencode/p1/api/session", { headers: { authorization: basic(projectPassword) } });

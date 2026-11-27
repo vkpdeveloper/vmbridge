@@ -40,7 +40,7 @@ export const isWatchPath = (path: string) => path === "/watch" || path.startsWit
 const notFound = () => new Response("Not found", { status: 404 });
 
 /** The address links handed out use: the one most devices can reach. */
-const preference: AddressKind[] = ["cloudflare", "worker", "tailscale-https", "tailscale-dns", "tailscale", "lan", "local"];
+export const addressPreference: AddressKind[] = ["cloudflare", "worker", "tailscale-https", "tailscale-dns", "tailscale", "lan", "local"];
 
 /**
  * The page's own headers. Its token is in the URL, so nothing it loads may send a referrer, and no cache or index may
@@ -156,7 +156,7 @@ export class Watch {
   async refresh() {
     try {
       const addresses = await this.deps.addresses();
-      this.base = preference.map((kind) => addresses.find((address) => address.kind === kind)).find(Boolean)?.url.replace(/\/+$/, "") ?? null;
+      this.base = addressPreference.map((kind) => addresses.find((address) => address.kind === kind)).find(Boolean)?.url.replace(/\/+$/, "") ?? null;
       this.ensure();
       await Promise.all(this.deps.fleet.connected().map((vmId) => this.deliver(vmId)));
     } catch {}
