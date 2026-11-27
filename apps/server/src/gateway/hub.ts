@@ -1307,8 +1307,8 @@ export class Hub extends EventEmitter<HubEvents> {
 
   /**
    * Sleeps VMs idle longer than the configured minutes. The VM's own shell decides: a running
-   * turn, queued work, a pending approval, or an automation about to run keeps it awake. First, an idle
-   * VM still running with older sign-ins restarts T3 to take the new ones.
+   * turn, queued work, a pending approval, or an automation about to run keeps it awake, and so does an agent running
+   * in OpenCode. First, an idle VM still running with older sign-ins restarts T3 to take the new ones.
    */
   async sweep(now = Date.now()) {
     const idleMs = this.settings.get("idleMinutes") * 60_000;
@@ -1332,8 +1332,12 @@ export class Hub extends EventEmitter<HubEvents> {
       if (!backend || !vm || this.fleet.leased(vmId)) continue;
       const shell = await backend.json<Shell>("/api/orchestration/shell").catch(() => null);
       if (!shell) continue;
-      if (await this.updateCredentials(vmId, shell)) continue;
-      if (hasLiveWork(shell) || this.runDue(vmId, now)) {
+      // Only asked when the VM would otherwise restart or sleep, as asking runs a command on it. A busy OpenCode counts as
+      // activity, so the next sweeps leave it for another idle period.
+      const due = this.fleet.stale(vmId) || now - (vm.lastActivityAt ?? vm.createdAt) >= idleMs;
+      const openCode = due && !hasLiveWork(shell) && (await this.fleet.openCodeBusy(vmId));
+      if (!openCode && (await this.updateCredentials(vmId, shell))) continue;
+      if (hasLiveWork(shell) || openCode || this.runDue(vmId, now)) {
         this.fleet.touch(vmId, now);
         this.setBusy(vmId, hasLiveWork(shell));
         await this.fleet.keepAlive(vmId).catch(() => {});
@@ -1380,7 +1384,9 @@ export class Hub extends EventEmitter<HubEvents> {
   /** Restarts T3 on an idle VM running with older sign-ins. Returns whether it tried. */
   private async updateCredentials(vmId: string, shell: Shell) {
     if (!this.fleet.stale(vmId) || hasLiveWork(shell) || this.fleet.leased(vmId)) return false;
-    await this.fleet.restart(vmId, async (live) => !hasLiveWork(await live.json<Shell>("/api/orchestration/shell"))).catch(() => {});
+    await this.fleet
+      .restart(vmId, async (live) => !hasLiveWork(await live.json<Shell>("/api/orchestration/shell")) && !(await this.fleet.openCodeBusy(vmId)))
+      .catch(() => {});
     return true;
   }
 
@@ -1400,7 +1406,7 @@ export class Hub extends EventEmitter<HubEvents> {
         await listing;
         // Caching took a while: work may have started on the VM meanwhile.
         const latest = await live.json<Shell>("/api/orchestration/shell");
-        if (hasLiveWork(latest)) return false;
+        if (hasLiveWork(latest) || (await this.fleet.openCodeBusy(vmId))) return false;
         const own = this.owned(vmId, latest);
         this.reported.set(vmId, own);
         this.store.saveSnapshot(vmId, "shell", own);

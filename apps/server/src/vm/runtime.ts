@@ -319,14 +319,17 @@ export function credentialsFingerprint(credentials: VmCredentials, encryption: E
   return encryption.fingerprint(JSON.stringify(rest));
 }
 
+/** Installs the OpenCode CLI unless the VM has it. Its output goes to stderr, as stdout is for reports. */
+export const installOpenCode = `command -v opencode >/dev/null || npm install -g --prefix ${root}/npm --no-audit --no-fund --loglevel=error opencode-ai >&2`;
+
 /** Writes a file atomically, creating its folder, from base64 on stdin. */
-const put = `put() { mkdir -p "\${1%/*}" && base64 -d > "$1.vmbridge-new" && mv -f "$1.vmbridge-new" "$1"; }`;
+export const put = `put() { mkdir -p "\${1%/*}" && base64 -d > "$1.vmbridge-new" && mv -f "$1.vmbridge-new" "$1"; }`;
 
 /**
  * Shell lines writing each file with `put`. The content goes as base64 in a quoted heredoc, so it never reaches a
  * command line, where other users of the VM could read it, and nothing in it can end the heredoc early.
  */
-const writes = (files: Record<string, string>) =>
+export const writes = (files: Record<string, string>) =>
   Object.entries(files)
     .map(([path, text]) => `put ${quote(path)} <<'VMBRIDGE_FILE'\n${Buffer.from(text).toString("base64").replace(/.{1,76}/g, "$&\n")}VMBRIDGE_FILE`)
     .join("\n");
@@ -335,7 +338,7 @@ const writes = (files: Record<string, string>) =>
  * Runs a bash program in the VM in one exec. It goes on stdin, so the files it writes never reach a command line. Bash
  * reads `main` whole before running it, and it runs without stdin, so nothing it starts can read the rest of the program.
  */
-async function runProgram(box: Box, body: string, what: string, timeoutMs = 120_000) {
+export async function runProgram(box: Box, body: string, what: string, timeoutMs = 120_000) {
   const result = await box.run("bash -s", { stdin: `set -euo pipefail\nmain() {\n${body}\n}\nmain </dev/null\n`, timeoutMs });
   // Only stderr's tail: setup output is install noise, and stdout can hold the VM's Codex sign-in.
   if (!result.ok) throw new Error(`${what} failed (exit ${result.exitCode}): ${result.stderr.slice(-600)}`);
@@ -400,7 +403,7 @@ export async function prepareVm(box: Box, t3Version: string, credentials: VmCred
     // Outside setup, as it follows the sign-ins rather than the image. Only with a sign-in: without one the CLI is not
     // installed, and T3 would list OpenCode as broken.
     `if [ -n "\${OPENCODE_API_KEY:-}" ]; then`,
-    `  command -v opencode >/dev/null || npm install -g --prefix ${root}/npm --no-audit --no-fund --loglevel=error opencode-ai >&2`,
+    `  ${installOpenCode}`,
     `  node -e ${quote(enableOpenCodeScript)} ${t3SettingsPath}`,
     "fi",
     ...(tools ? [screenToolsSetup(tools)] : []),

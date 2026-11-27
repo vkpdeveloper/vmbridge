@@ -15,6 +15,8 @@ import { githubName } from "./gateway/repos.ts";
 import { hasLiveWork, type Shell } from "./gateway/types.ts";
 import type { Skills } from "./skills.ts";
 import { Bases } from "./vm/bases.ts";
+import { newToken } from "./auth/tokens.ts";
+import { NoOpenCodeKey, openCodeBusy, OpenCodeServer, opencodePort, startOpenCode, stopOpenCode } from "./vm/opencode.ts";
 import { syncSkills } from "./vm/skills.ts";
 import { checkoutRoot, credentialsFingerprint, prepareVm, quote, readCodexAuth, resolveT3Version, startT3, t3Port, writeCodexAuth, writeCredentials, type VmCredentials } from "./vm/runtime.ts";
 
@@ -69,6 +71,12 @@ const shortId = () =>crypto.randomUUID().replaceAll("-", "").slice(0, 12);
 
 /** How often to look for untracked VMs before a create, after the check on start. */
 export const reconcileEveryMs = 10 * 60_000;
+
+/**
+ * What VM Bridge reaches on each VM. Railway opens only the ports a VM was made or last woken with, so a Railway VM
+ * awake from before OpenCode was added reaches it once it sleeps and wakes. Other providers open any port on demand.
+ */
+const vmPorts = [t3Port, opencodePort];
 /** Provider keys VM Bridge creates: a VM's ID, with a suffix when it starts from a snapshot or checkpoint. */
 const vmKey = /^([0-9a-f]{12})(?:-[0-9a-z]+)?$/;
 /** Provider keys of base snapshot build VMs (see vm/bases.ts). */
@@ -103,6 +111,8 @@ export class Fleet extends EventEmitter<FleetEvents> {
   private readonly backends = new Map<string, Backend>();
   private readonly boxes = new Map<string, Box>();
   private readonly connecting = new Map<string, Promise<Backend>>();
+  /** OpenCode on awake VMs, from its first use until the VM goes offline. */
+  private readonly opencodes = new Map<string, Promise<OpenCodeServer>>();
   private readonly placing = new Map<string, Promise<string>>();
   private readonly locks = new Map<string, Promise<unknown>>();
   private readonly leases = new Map<string, number>();
@@ -145,6 +155,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
     private readonly openSocket: OpenSocket,
   ) {
     super();
+    this.on("offline", (vmId) => this.opencodes.delete(vmId));
     this.bases = new Bases(
       store,
       (provider) => this.driver(provider),
@@ -262,7 +273,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
       let box: Box;
       let based: boolean;
       try {
-        ({ box, based } = await this.createBox(provider, driver, { key: id, size, labels: this.labels(), ports: [t3Port] }));
+        ({ box, based } = await this.createBox(provider, driver, { key: id, size, labels: this.labels(), ports: vmPorts }));
         watch.lap(based ? "provider create from base snapshot" : "provider create");
       } catch (error) {
         this.traffic.record({ kind: "provider", operation: "create VM", vmId: id, status: "error" });
@@ -388,7 +399,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
         key: vm.id,
         size: vm.size,
         labels: this.labels(),
-        ports: [t3Port],
+        ports: vmPorts,
         sandboxId: vm.sandboxId,
         checkpoint: vm.checkpoint,
       });
@@ -406,11 +417,12 @@ export class Fleet extends EventEmitter<FleetEvents> {
         }
       }
       this.boxes.set(vmId, box);
+      const woken = box;
       // A T3 server still running from before VM Bridge restarted may be in the middle of a turn: then the idle sweep restarts it later.
       const backend = await this.connect(vm, box, await version, async (preview) => {
         if (wasAsleep || !vm.t3Token) return true;
         const shell = await new Backend(vmId, preview, vm.t3Token, this.openSocket).json<Shell>("/api/orchestration/shell").catch(() => null);
-        return Boolean(shell && !hasLiveWork(shell));
+        return Boolean(shell && !hasLiveWork(shell)) && !(await openCodeBusy(woken).catch(() => false));
       }, watch);
       watch.done();
       this.touch(vmId);
@@ -464,6 +476,11 @@ export class Fleet extends EventEmitter<FleetEvents> {
     // Before T3 starts or VM Bridge sends it anything, so no agent on a woken VM runs with old skills.
     if (await this.syncSkills(vm.id, box, prepared.skillsManifest)) watch.lap("sync skills");
     const restart = vm.t3Credentials !== fingerprint && (await idle(preview));
+    // OpenCode reads the env file only as it starts. The next request for it starts it again.
+    if (restart && vm.opencodePassword) {
+      this.opencodes.delete(vm.id);
+      await stopOpenCode(box);
+    }
     let server = await startT3(box, vm.t3Token, restart, prepared.t3);
     watch.lap("start T3, session");
     if (server.descriptor.orchestrationProtocolVersion !== 2) {
@@ -688,6 +705,61 @@ export class Fleet extends EventEmitter<FleetEvents> {
         throw error;
       }
     });
+  }
+
+  /**
+   * OpenCode on an awake VM, started in its project's checkout on first use. It is never woken for: callers `ensure`
+   * the VM first. A failed start is not kept, so the next request tries again.
+   */
+  async opencode(vmId: string): Promise<OpenCodeServer> {
+    const cached = this.opencodes.get(vmId);
+    const server = await cached?.catch(() => null);
+    if (server && !server.expiring) return server;
+    if (cached && this.opencodes.get(vmId) === cached) this.opencodes.delete(vmId);
+    let flight = this.opencodes.get(vmId);
+    if (!flight) {
+      flight = this.exclusive(vmId, () => this.startOpenCode(vmId));
+      this.opencodes.set(vmId, flight);
+      const started = flight;
+      started.catch(() => {
+        if (this.opencodes.get(vmId) === started) this.opencodes.delete(vmId);
+      });
+    }
+    return flight;
+  }
+
+  /** Drops what VM Bridge knows of a VM's OpenCode, such as after it stopped answering. The next request checks again. */
+  forgetOpenCode(vmId: string, server: OpenCodeServer) {
+    void this.opencodes.get(vmId)?.then((current) => {
+      if (current === server) this.opencodes.delete(vmId);
+    }, () => {});
+  }
+
+  private async startOpenCode(vmId: string): Promise<OpenCodeServer> {
+    const vm = this.store.vm(vmId);
+    const box = this.box(vmId);
+    if (!vm || !box) throw new Error(`VM ${vmId} is not awake.`);
+    // VM Bridge gives each project one VM's OpenCode: its primary's.
+    const checkout = this.store.projects().find((project) => primaryVm(project)?.vmId === vmId)?.vms[0]?.checkoutPath ?? checkoutRoot;
+    const password = vm.opencodePassword ?? newToken();
+    if (!vm.opencodePassword) this.store.updateVm(vmId, { opencodePassword: password });
+    const started = performance.now();
+    try {
+      await startOpenCode(box, password, checkout);
+      const driver = this.driver(vm.provider);
+      const preview = await (driver.preview ? driver.preview(box, opencodePort) : box.preview(opencodePort));
+      this.traffic.record({ kind: "provider", operation: "start OpenCode", vmId, status: "ok", durationMs: Math.round(performance.now() - started) });
+      return new OpenCodeServer(vmId, preview, password, this.openSocket);
+    } catch (error) {
+      if (!(error instanceof NoOpenCodeKey)) this.traffic.record({ kind: "provider", operation: "start OpenCode", vmId, status: "error", reason: message(error) });
+      throw error;
+    }
+  }
+
+  /** Whether an agent runs in OpenCode on an awake VM now. Asks the VM, so callers ask only when the answer matters. */
+  async openCodeBusy(vmId: string) {
+    const box = this.box(vmId);
+    return box ? openCodeBusy(box).catch(() => false) : false;
   }
 
   /** Extends provider-side auto-stop timers while agents work. */

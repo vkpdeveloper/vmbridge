@@ -12,6 +12,8 @@ export interface VmRow {
   state: VmState;
   error: string | null;
   t3Token: string | null;
+  /** The password of the VM's OpenCode server, given the first time OpenCode starts there (see vm/opencode.ts). */
+  opencodePassword: string | null;
   t3Version: string | null;
   /** Fingerprint of the sign-ins the VM's running T3 server started with (see `credentialsFingerprint`). */
   t3Credentials: string | null;
@@ -44,7 +46,7 @@ export interface ProjectRow {
 /** The VM a project's root path and new automations go to. */
 export const primaryVm = (project: ProjectRow): ProjectVm | undefined => project.vms[0];
 
-const vmColumns = `id, provider, sandbox_id AS sandboxId, name, size, state, error, t3_token AS t3Token,
+const vmColumns = `id, provider, sandbox_id AS sandboxId, name, size, state, error, t3_token AS t3Token, opencode_password AS opencodePassword,
   t3_version AS t3Version, t3_credentials AS t3Credentials, skills, checkpoint, created_at AS createdAt, last_activity_at AS lastActivityAt,
   last_connected_at AS lastConnectedAt, last_slept_at AS lastSleptAt`;
 
@@ -55,6 +57,7 @@ const vmFields = {
   state: "state",
   error: "error",
   t3Token: "t3_token",
+  opencodePassword: "opencode_password",
   t3Version: "t3_version",
   t3Credentials: "t3_credentials",
   skills: "skills",
@@ -156,20 +159,37 @@ export class Store {
     return vm ? this.openVm(vm) : null;
   }
 
-  /** The token for a VM's T3 server is stored encrypted. */
+  /** The token for a VM's T3 server and its OpenCode password are stored encrypted. */
   private openVm(vm: VmRow): VmRow {
-    return vm.t3Token ? { ...vm, t3Token: this.encryption.open(vm.t3Token, `vm:${vm.id}:t3Token`) } : vm;
+    return {
+      ...vm,
+      t3Token: vm.t3Token && this.encryption.open(vm.t3Token, `vm:${vm.id}:t3Token`),
+      opencodePassword: vm.opencodePassword && this.encryption.open(vm.opencodePassword, `vm:${vm.id}:opencodePassword`),
+    };
   }
 
-  /** Encrypts, or drops, T3 tokens stored unencrypted (see `Plaintext`). Returns what it changed. */
+  /** Encrypts, or drops, T3 tokens and OpenCode passwords stored unencrypted (see `Plaintext`). Returns what it changed. */
   plaintext(action: Plaintext): string[] {
-    const rows = this.db.all<{ id: string; t3Token: string }>("SELECT id, t3_token AS t3Token FROM vms WHERE t3_token IS NOT NULL AND t3_token != ''")
-      .filter((row) => !Encryption.isSealed(row.t3Token));
+    const rows = this.db.all<{ id: string; t3Token: string | null; opencodePassword: string | null }>(
+      "SELECT id, t3_token AS t3Token, opencode_password AS opencodePassword FROM vms",
+    );
+    const plain = (value: string | null): value is string => value !== null && value !== "" && !Encryption.isSealed(value);
+    const tokens = rows.filter((row) => plain(row.t3Token));
+    const passwords = rows.filter((row) => plain(row.opencodePassword));
+    const projects = this.db.all<{ id: string; password: string | null }>("SELECT id, opencode_password AS password FROM projects")
+      .filter((row) => plain(row.password));
     this.db.transaction(() => {
-      // Without a token, the VM's T3 server gets a new one when it next connects.
-      for (const row of rows) this.updateVm(row.id, { t3Token: action === "seal" ? row.t3Token : null });
+      // Without a token, the VM's T3 server gets a new one when it next connects. Without a password, OpenCode gets a
+      // new one when it next starts, and a project's clients need the new one from the dashboard.
+      for (const row of tokens) this.updateVm(row.id, { t3Token: action === "seal" ? row.t3Token : null });
+      for (const row of passwords) this.updateVm(row.id, { opencodePassword: action === "seal" ? row.opencodePassword : null });
+      for (const row of projects) this.setOpenCodePassword(row.id, action === "seal" ? row.password : null);
     });
-    return rows.map((row) => `T3 token of VM ${row.id}`);
+    return [
+      ...tokens.map((row) => `T3 token of VM ${row.id}`),
+      ...passwords.map((row) => `OpenCode password of VM ${row.id}`),
+      ...projects.map((row) => `OpenCode password of project ${row.id}`),
+    ];
   }
 
   insertVm(vm: Pick<VmRow, "id" | "provider" | "name" | "size" | "state" | "createdAt">) {
@@ -180,7 +200,10 @@ export class Store {
   }
 
   updateVm(id: string, update: VmUpdate) {
-    const { sql, values } = assignments(vmFields, update.t3Token ? { ...update, t3Token: this.encryption.seal(update.t3Token, `vm:${id}:t3Token`) } : update);
+    const sealed = { ...update };
+    if (update.t3Token) sealed.t3Token = this.encryption.seal(update.t3Token, `vm:${id}:t3Token`);
+    if (update.opencodePassword) sealed.opencodePassword = this.encryption.seal(update.opencodePassword, `vm:${id}:opencodePassword`);
+    const { sql, values } = assignments(vmFields, sealed);
     if (sql) this.db.run(`UPDATE vms SET ${sql} WHERE id = ?`, ...values, id);
   }
 
@@ -266,6 +289,17 @@ export class Store {
     const { sql, values } = assignments(projectFields, update);
     if (sql) this.db.run(`UPDATE projects SET ${sql} WHERE id = ?`, ...values, id);
     this.projectCache = null;
+  }
+
+  /** The password OpenCode clients give for this project (see gateway/opencode.ts), stored encrypted. Null until the dashboard makes one. */
+  openCodePassword(projectId: string): string | null {
+    const sealed = this.db.one<{ password: string | null }>("SELECT opencode_password AS password FROM projects WHERE id = ?", projectId)?.password;
+    return sealed ? this.encryption.open(sealed, `project:${projectId}:opencodePassword`) : null;
+  }
+
+  setOpenCodePassword(projectId: string, password: string | null) {
+    const sealed = password && this.encryption.seal(password, `project:${projectId}:opencodePassword`);
+    this.db.run("UPDATE projects SET opencode_password = ? WHERE id = ?", sealed, projectId);
   }
 
   /** Adds a VM to a project, after its existing ones. */

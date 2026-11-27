@@ -7,6 +7,7 @@ import { openBridge, type Bridge } from "../bridge.ts";
 import { keyFromText, keyVariable } from "../encryption.ts";
 import { message } from "../fleet.ts";
 import type { Upgrade } from "../gateway/http.ts";
+import { isOpenCodeRequest } from "../gateway/opencode.ts";
 import { bridgeJobs } from "../jobs.ts";
 import { releaseCheck } from "../release.ts";
 import { isWatchPath, type WatchUpgrade } from "../watch/watch.ts";
@@ -123,6 +124,8 @@ export class BridgeObject extends DurableObject<Env> {
       const origin = { address: request.headers.get("cf-connecting-ip") ?? "unknown", secure: url.protocol === "https:" };
       return withSecurityHeaders(await running.admin.fetch(request, origin));
     }
+    // Before T3's paths: `opencode api` asks for /api/ paths at the root.
+    if (isOpenCodeRequest(request)) return (await running.bridge.opencode.fetch(request, running.watchUpgrade)) ?? new Response("Not found", { status: 404 });
     return (await running.bridge.gateway.fetch(request, running.upgrade, running.watchUpgrade)) ?? new Response("Not found", { status: 404 });
   }
 

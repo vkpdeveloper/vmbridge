@@ -22,6 +22,7 @@ import { bridgeJobs } from "./jobs.ts";
 import { fetchGitHubAccount } from "./github.ts";
 import { maxUploadBytes, uploadPrefix } from "./gateway/attachments.ts";
 import { isT3Path, type SocketData } from "./gateway/http.ts";
+import { isOpenCodeRequest } from "./gateway/opencode.ts";
 import { Listeners } from "./bun/listeners.ts";
 import { networkInfo, wantedHosts } from "./bun/network.ts";
 import { Secrets, type Plaintext } from "./settings.ts";
@@ -110,7 +111,7 @@ export async function start(options: StartOptions = {}) {
       if (!migrated) markMigrated();
     },
   });
-  const { settings, key: encryptionKey, secrets, traffic, skills, fleet, stats, usage, budget, hub, gateway, auth, watch } = bridge;
+  const { settings, key: encryptionKey, secrets, traffic, skills, fleet, stats, usage, budget, hub, gateway, opencode, auth, watch } = bridge;
   // Defined before the server starts listening; its listener only opens once the tunnel is on.
   let tunnel: CloudflareTunnel;
   let listeners: Listeners<Socket>;
@@ -160,9 +161,11 @@ export async function start(options: StartOptions = {}) {
       fetch(request, server) {
         if (stopping) return new Response("VM Bridge is stopping", { status: 503, headers: { "retry-after": "1" } });
         const { pathname: path, search } = new URL(request.url);
-        // A body without a length (chunked) could otherwise grow to the upload limit.
+        // A body without a length (chunked) could otherwise grow to the upload limit. OpenCode's go to the VM as they
+        // arrive, and its prompts can carry files.
         const length = request.headers.get("content-length");
-        if (request.body && !path.startsWith(uploadPrefix) && (length === null || !(Number(length) <= 2 * 1024 * 1024))) {
+        const opencodeRequest = isOpenCodeRequest(request);
+        if (request.body && !path.startsWith(uploadPrefix) && !opencodeRequest && (length === null || !(Number(length) <= 2 * 1024 * 1024))) {
           return new Response("Request body too large", { status: 413 });
         }
         // Routes match exactly, so /dashboard/ would miss. The browser keeps the fragment (onboarding's #code=) across the redirect.
@@ -173,6 +176,8 @@ export async function start(options: StartOptions = {}) {
           return admin.fetch(request, requestOrigin(request, server.requestIP(request)?.address, viaTunnel)).then(withSecurityHeaders);
         }
         const relay = (upgrade: Request, viewer: Viewer) => (server.upgrade(upgrade, { data: { viewer } }) ? undefined : null);
+        // Before T3's paths: `opencode api` asks for /api/ paths at the root.
+        if (opencodeRequest) return opencode.fetch(request, relay);
         if (isT3Path(path)) return gateway.fetch(request, (upgrade, data) => (server.upgrade(upgrade, { data }) ? undefined : null), relay);
         // Before the dashboard's files, which would otherwise answer for any path.
         if (isWatchPath(path)) return watch.fetch(request, relay);

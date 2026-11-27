@@ -13,6 +13,7 @@ import {
   type VmInfo,
   type VmSize,
   type BridgeUpdate,
+  type OpenCodeConnection,
 } from "@vmbridge/contracts";
 import { analyticsReport } from "./analytics.ts";
 import { InvalidSignIn, type AgentAuth, type TokenInput } from "./agent-auth/profiles.ts";
@@ -24,6 +25,8 @@ import { message, providerValues, type Fleet } from "./fleet.ts";
 import type { Hub } from "./gateway/hub.ts";
 import { keptIconHeaders, projectIcon } from "./gateway/icons.ts";
 import type { T3Gateway } from "./gateway/http.ts";
+import { openCodePrefix, type OpenCodeGateway } from "./gateway/opencode.ts";
+import { newToken } from "./auth/tokens.ts";
 import { githubName } from "./gateway/repos.ts";
 import { agentKind, agentName } from "./gateway/agents.ts";
 import { isWorking, str } from "./gateway/types.ts";
@@ -76,6 +79,7 @@ export interface AdminDeps {
   clients: Clients;
   auth: DashboardAuth;
   gateway: T3Gateway;
+  opencode: OpenCodeGateway;
   agents: AgentAuth;
   stats: Stats;
   skills: Skills;
@@ -126,7 +130,8 @@ function timeRange(request: Request) {
 
 /**
  * The dashboard's API under /admin/api. Every route except login and first password setup needs the dashboard cookie.
- * Secret values go in and never come out: responses only say whether each one is set.
+ * Secret values go in and never come out: responses only say whether each one is set. The exceptions are credentials
+ * VM Bridge makes for clients to copy, such as pairing links and OpenCode passwords.
  */
 export class Admin {
   /** The dashboard's install of a new release is running. A second Update click while it runs does nothing. */
@@ -262,6 +267,21 @@ export class Admin {
       const file = icon && hub.icons.file(icon.revision);
       if (!file) return json({ error: "This project has no logo." }, 404);
       return new Response(file, { headers: keptIconHeaders(file.type) });
+    }
+    // A project's OpenCode address and password, made the first time. `renew` makes a new password and ends the
+    // connections that used the old one.
+    if (section === "projects" && id && action === "opencode" && method === "POST") {
+      if (!store.project(id)) return json({ error: "Not found." }, 404);
+      const renew = (await body(request)).renew === true;
+      let password = store.openCodePassword(id);
+      if (!password || renew) {
+        password = newToken();
+        store.setOpenCodePassword(id, password);
+        if (renew) this.deps.opencode.disconnect(id);
+      }
+      const { addresses } = await this.deps.network.info(request);
+      const urls = addresses.map((address) => ({ ...address, url: `${address.url}${openCodePrefix}${id}` }));
+      return json({ urls, password } satisfies OpenCodeConnection);
     }
     if (section === "network" && id && !action && method === "POST") {
       const changed = await this.deps.network.change(id, await body(request));

@@ -683,6 +683,12 @@ export interface CreatedPairing {
   urls: PairingUrl[];
 }
 
+/** How OpenCode connects to a project: an address for each way VM Bridge can be reached, and the project's password. */
+export interface OpenCodeConnection {
+  urls: Address[];
+  password: string;
+}
+
 export interface ApiError {
   error: string;
 }

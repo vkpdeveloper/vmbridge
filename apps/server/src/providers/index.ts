@@ -1,4 +1,4 @@
-import { Boxd, NotFoundError } from "@boxd-sh/sdk";
+import { Boxd, NotFoundError, type Proxy } from "@boxd-sh/sdk";
 import { Boxd as BoxdWeb } from "@boxd-sh/sdk/web";
 import { SandboxError } from "@opencoredev/sandbox-sdk";
 import { boxd } from "@opencoredev/sandbox-sdk/boxd";
@@ -14,7 +14,7 @@ import { daytonaProvider } from "./daytona.ts";
 import { e2bProvider } from "./e2b.ts";
 import { kubiProvider } from "./kubi.ts";
 import { notFound, retryNotFound, sdkDriver } from "./sdk.ts";
-import { required, type ProviderDefinition } from "./types.ts";
+import { required, type Box, type ProviderDefinition } from "./types.ts";
 
 export type { Box, Driver, ProviderDefinition, ProviderState, ScreenStream } from "./types.ts";
 
@@ -31,10 +31,31 @@ async function ignoreNotFound(request: Promise<unknown>) {
 // boxd suspends on its own after this long without traffic, in case VM Bridge is down.
 const boxdIdleTimeoutMs = minutes(60);
 
+interface BoxdProxies {
+  list(machine: string): Promise<Pick<Proxy, "name" | "domain">[]>;
+  create(machine: string, name: string, port: number): Promise<unknown>;
+}
+
+/**
+ * A route to `port` beside the machine's default one, which T3 holds: boxd's own preview would point the default route
+ * at `port`. It is made once and stays with the machine, as pausing keeps it.
+ */
+async function boxdRoute(proxies: BoxdProxies, machine: string, port: number) {
+  const name = `port-${port}`;
+  const find = async () => (await proxies.list(machine)).find((proxy) => proxy.name === name);
+  let route = await find();
+  if (!route) {
+    await proxies.create(machine, name, port);
+    route = await find();
+  }
+  if (!route) throw new Error(`boxd made no route to port ${port}.`);
+  return { url: `https://${route.domain}` };
+}
+
 /** boxd over grpc-js, through the SDK's boxd adapter. The default on Bun. */
 function boxdGrpcDriver(apiKey: string) {
   const provider = boxd({ apiKey });
-  return sdkDriver({
+  const driver = sdkDriver({
     id: "boxd",
     provider,
     sleep: "pause",
@@ -53,18 +74,31 @@ function boxdGrpcDriver(apiKey: string) {
       }
     },
   });
+  return {
+    ...driver,
+    async preview(box: Box, port: number) {
+      const client = new Boxd({ apiKey });
+      try {
+        return await boxdRoute(client.machines.proxies, box.id, port);
+      } finally {
+        await client.close();
+      }
+    },
+  };
 }
 
 /** boxd over gRPC-web, for Workers. Its provider deletes snapshots itself. */
 function boxdWebDriver(apiKey: string) {
-  const provider = boxdWeb(new BoxdWeb({ apiKey, timeout: 30_000, maxRetries: 0 }), { apiKey });
-  return sdkDriver({
+  const client = new BoxdWeb({ apiKey, timeout: 30_000, maxRetries: 0 });
+  const provider = boxdWeb(client, { apiKey });
+  const driver = sdkDriver({
     id: "boxd",
     provider,
     sleep: "pause",
     create: { idleTimeoutMs: boxdIdleTimeoutMs },
     listSleeping: provider.listSleeping,
   });
+  return { ...driver, preview: (box: Box, port: number) => boxdRoute(client.machines.proxies, box.id, port) };
 }
 
 const boxdProvider: ProviderDefinition = {
