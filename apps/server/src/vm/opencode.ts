@@ -6,6 +6,34 @@ import { previewTarget } from "./backend.ts";
 import { put, quote, root, runProgram, writes } from "./runtime.ts";
 
 export const opencodePort = 4096;
+
+/**
+ * Where `vmbridge opencode` makes a worktree: beside the checkout, under a folder git and the project's own files never
+ * see, as `/workspace/.worktrees/<repo>/<name>`.
+ */
+export const worktreePath = (checkout: string, name: string) => {
+  const slash = checkout.lastIndexOf("/");
+  return `${checkout.slice(0, slash)}/.worktrees/${checkout.slice(slash + 1)}/${name}`;
+};
+/** A worktree's name, as the gateway takes it from an OpenCode address. */
+export const worktreeName = /^[a-z0-9]{4,32}$/;
+
+/**
+ * Removes a worktree and its `opencode/<name>` branch once nothing would be lost: no uncommitted or untracked files,
+ * and no commit that is not on the remote. Prints `removed` or `kept`.
+ */
+export function removeWorktreeProgram(checkout: string, name: string) {
+  const path = quote(worktreePath(checkout, name));
+  return `cd ${quote(checkout)}
+if [ -d ${path} ]; then
+  [ -z "$(git -C ${path} status --porcelain)" ] || { printf kept; exit 0; }
+  [ -z "$(git -C ${path} rev-list -1 HEAD --not --remotes)" ] || { printf kept; exit 0; }
+  git worktree remove --force ${path}
+fi
+git worktree prune
+git branch -D ${quote(`opencode/${name}`)} >/dev/null 2>&1 || true
+printf removed`;
+}
 const dir = `${root}/opencode`;
 const passwordPath = `${dir}/password`;
 const startPath = `${dir}/start.sh`;

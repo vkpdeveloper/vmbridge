@@ -3,16 +3,18 @@ import { BudgetReached } from "../budget.ts";
 import { message, NoProvider, type Fleet } from "../fleet.ts";
 import { primaryVm, type Store } from "../store.ts";
 import type { Traffic } from "../traffic.ts";
-import { cliVersion, NoOpenCodeKey, OpenCodeUnreachable, type OpenCodeServer } from "../vm/opencode.ts";
+import { cliVersion, NoOpenCodeKey, OpenCodeUnreachable, worktreeName, worktreePath, type OpenCodeServer } from "../vm/opencode.ts";
 import type { Viewer, WatchUpgrade } from "../watch/watch.ts";
 import { previewRelay } from "./preview.ts";
 
 /**
  * Each project's OpenCode address is VM Bridge's own with this and the project's ID after it. OpenCode's clients keep
  * the path of the address they are given, except `opencode api`, which asks from the root: those requests are known by
- * their password instead.
+ * their password instead. `vmbridge opencode` adds `/w/<vmId>/<worktree>`, for a worktree on one of the project's VMs.
  */
 export const openCodePrefix = "/opencode/";
+const worktreeAddress = /^\/w\/([\w-]{1,64})\/([^/]+)(\/.*)?$/;
+const locationKey = "location[directory]";
 
 const retryAfterSeconds = 10;
 /**
@@ -256,9 +258,13 @@ export class OpenCodeGateway {
     return response;
   }
 
-  /** The project a request names in its path, if any, and the path and query to ask the VM, without the password. */
-  private target(url: URL): { projectId: string | null; path: string } | null {
+  /**
+   * The project a request names in its path, if any, the worktree on one of its VMs, and the path and query to ask the
+   * VM, without the password.
+   */
+  private target(url: URL): { projectId: string | null; worktree: { vmId: string; name: string } | null; path: string } | null {
     let projectId: string | null = null;
+    let worktree = null;
     let path = url.pathname;
     if (path.startsWith(openCodePrefix)) {
       const rest = path.slice(openCodePrefix.length);
@@ -266,11 +272,30 @@ export class OpenCodeGateway {
       projectId = slash < 0 ? rest : rest.slice(0, slash);
       path = slash < 0 ? "/" : rest.slice(slash);
       if (!projectId) return null;
+      const named = worktreeAddress.exec(path);
+      if (named) {
+        if (!worktreeName.test(named[2]!)) return null;
+        worktree = { vmId: named[1]!, name: named[2]! };
+        path = named[3] ?? "/";
+      }
     } else if (!atRoot(path) && !connectPath.test(path)) return null;
     const query = new URLSearchParams(url.search);
     query.delete("auth_token");
     const search = query.toString();
-    return { projectId, path: search ? `${path}?${search}` : path };
+    return { projectId, worktree, path: search ? `${path}?${search}` : path };
+  }
+
+  /**
+   * A worktree address's folder on the VM. OpenCode's terminal app first asks for the folder it runs in on this
+   * computer, which the VM lacks, then for the server's own folder without naming one: that answer is the worktree, so
+   * it works there.
+   */
+  private atWorktree(path: string, method: string, folder: string) {
+    const [pathname, search = ""] = path.split("?") as [string, string?];
+    const query = new URLSearchParams(search);
+    if (method !== "GET" || pathname !== "/api/location" || query.has(locationKey)) return path;
+    query.set(locationKey, folder);
+    return `${pathname}?${query}`;
   }
 
   private accepts(projectId: string, password: string | null) {
@@ -310,13 +335,20 @@ export class OpenCodeGateway {
     }
     if (!this.hasKey()) return problem(503, new NoOpenCodeKey().message);
 
+    // A worktree's VM, which must be one of the project's, holding its checkout.
+    let folder: string | null = null;
+    if (target.worktree) {
+      const checkout = project.vms.find((entry) => entry.vmId === target.worktree!.vmId)?.checkoutPath;
+      if (!checkout) return notFound();
+      folder = worktreePath(checkout, target.worktree.name);
+    }
     // Neither wakes a sleeping VM: a ticket comes from a VM that was awake, and an idle client reopens its event stream
     // on its own, which would wake the VM again each time it slept.
     const waking = signedIn && !(request.method === "GET" && pathname === "/api/event");
-    const primary = primaryVm(project)?.vmId;
+    const known = target.worktree?.vmId ?? primaryVm(project)?.vmId;
     let ready: Promise<{ vmId: string; server: OpenCodeServer }>;
-    if (waking) ready = this.wake(project.id);
-    else if (primary && this.fleet.backend(primary)) ready = this.fleet.opencode(primary).then((server) => ({ vmId: primary, server }));
+    if (waking) ready = target.worktree ? this.wakeVm(target.worktree.vmId) : this.wake(project.id);
+    else if (known && this.fleet.backend(known)) ready = this.fleet.opencode(known).then((server) => ({ vmId: known, server }));
     else return tryAgain("This project's VM is asleep. Send a request to wake it.");
     const info = waking && request.method === "GET" && pathname === "/api/info";
     const found = await within(ready, info ? Math.min(infoWaitMs, this.wakeWaitMs) : this.wakeWaitMs);
@@ -328,13 +360,17 @@ export class OpenCodeGateway {
     }
     const { vmId, server } = found;
     seen.vmId = vmId;
-    if (upgrade) return this.socket(request, relay, vmId, server, target.path, seen);
-    return this.forward(request, vmId, server, target.path, seen);
+    const path = folder ? this.atWorktree(target.path, request.method, folder) : target.path;
+    if (upgrade) return this.socket(request, relay, vmId, server, path, seen);
+    return this.forward(request, vmId, server, path, seen);
   }
 
   /** Wakes the project's VM, making it one if it has none, and starts OpenCode there. */
   private async wake(projectId: string) {
-    const vmId = await this.fleet.place(projectId);
+    return this.wakeVm(await this.fleet.place(projectId));
+  }
+
+  private async wakeVm(vmId: string) {
     await this.fleet.ensure(vmId);
     return { vmId, server: await this.fleet.opencode(vmId) };
   }

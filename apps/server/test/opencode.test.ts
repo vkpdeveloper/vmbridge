@@ -199,6 +199,26 @@ describe("OpenCode gateway", () => {
     expect(calls.ensure).toBe(1);
   });
 
+  test("a worktree address goes to its VM, and OpenCode's question for the server's folder gets the worktree", async () => {
+    const { gateway, store } = setup();
+    store.setCheckout("p1", "vm1", "/workspace/app");
+    const auth = { headers: { authorization: basic(projectPassword) } };
+    expect((await send(gateway, "/opencode/p1/w/vm1/ab12cd34/api/location", auth)).status).toBe(200);
+    expect(asked[0]!.path).toStartWith(`/api/location?${new URLSearchParams({ "location[directory]": "/workspace/.worktrees/app/ab12cd34" })}`);
+    // A folder the client names goes through as it is, so the VM can say it has no such folder.
+    await send(gateway, "/opencode/p1/w/vm1/ab12cd34/api/fs/list?location%5Bdirectory%5D=%2FUsers%2Fme", auth);
+    expect(asked[1]!.path).toStartWith("/api/fs/list?location%5Bdirectory%5D=%2FUsers%2Fme");
+  });
+
+  test("a worktree address names only the project's own VMs and plain worktree names", async () => {
+    const { gateway, store } = setup();
+    store.setCheckout("p1", "vm1", "/workspace/app");
+    const auth = { headers: { authorization: basic(projectPassword) } };
+    expect((await send(gateway, "/opencode/p1/w/vm2/ab12cd34/api/info", auth)).status).toBe(404);
+    expect((await send(gateway, "/opencode/p1/w/vm1/..%2Fetc/api/info", auth)).status).toBe(404);
+    expect(asked).toEqual([]);
+  });
+
   test("an event stream does not wake a sleeping VM", async () => {
     const { gateway, calls } = setup({ awake: false });
     const response = await send(gateway, "/opencode/p1/api/event", { headers: { authorization: basic(projectPassword) } });

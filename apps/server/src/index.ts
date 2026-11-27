@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { ServerWebSocket, WebSocketHandler } from "bun";
 import { version } from "../../../package.json" with { type: "json" };
 import { Admin } from "./admin.ts";
+import { Clients } from "./auth/clients.ts";
 import { DashboardAuth } from "./auth/dashboard.ts";
 import { importAuthFiles } from "./bun/auth-files.ts";
 import { bunMachine } from "./bun/machine.ts";
@@ -42,6 +43,7 @@ export const databasePath = (dir = dataDir()) => join(dir, "main.db");
 /** Running as the compiled release binary, not with Bun from source. Only the binary can update itself. */
 export const compiled = Bun.main.startsWith("/$bunfs/") || Bun.main.startsWith("B:/~BUN/");
 export { checksumFor, isNewer, latestVersion, releaseRepo } from "./release.ts";
+export { tokenExchange } from "./gateway/http.ts";
 
 /**
  * Data saved before encryption existed is sealed, until `openEncryption` says that ran. Each table moves in one
@@ -56,6 +58,22 @@ function plaintext(db: Sql, dir: string, migrated: boolean, tables: { plaintext(
     // Rewrites the database so the replaced plain text is not left behind in free pages or the write-ahead log.
     db.exec("VACUUM");
     db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  }
+}
+
+/**
+ * Signs this machine's `vmbridge` CLI in as a paired device, without the dashboard: whoever can read the data folder
+ * can run VM Bridge itself. It shows in the dashboard's devices, where it can be removed. Returns its bearer token.
+ */
+export function pairThisMachine(name: string, dir = dataDir()) {
+  const db = openDatabase(databasePath(dir));
+  try {
+    const clients = new Clients(db);
+    const token = clients.exchange(clients.createLink(name).token);
+    if (!token) throw new Error("VM Bridge could not pair this machine.");
+    return token;
+  } finally {
+    db.close();
   }
 }
 

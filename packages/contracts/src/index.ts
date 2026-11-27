@@ -694,6 +694,30 @@ export interface OpenCodeConnection {
   pairing: { code: string; urls: string[]; expiresInSeconds: number } | null;
 }
 
+/** One line of `POST /api/vmbridge/opencode`'s answer, for `vmbridge opencode`: a step, a warning, then ready or an error. */
+export type OpenCodeLaunchEvent =
+  | { step: string }
+  | { notice: string }
+  | { error: string }
+  | {
+      ready: {
+        /** The OpenCode address, under the VM Bridge address the request went to. */
+        path: string;
+        password: string;
+        projectId: string;
+        project: string;
+        vmId: string;
+        vm: string;
+        /** The worktree's name, which `DELETE /api/vmbridge/opencode` takes with the two ids to remove it. */
+        name: string;
+        /** The worktree on the VM. */
+        directory: string;
+        branch: string;
+        /** The branch the worktree started from. */
+        base: string;
+      };
+    };
+
 export interface ApiError {
   error: string;
 }

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { SandboxError, type Preview } from "@opencoredev/sandbox-sdk";
 import type { ProviderId, ProviderSetup, VmSize, VmState } from "@vmbridge/contracts";
@@ -16,9 +17,9 @@ import { hasLiveWork, type Shell } from "./gateway/types.ts";
 import type { Skills } from "./skills.ts";
 import { Bases } from "./vm/bases.ts";
 import { newToken } from "./auth/tokens.ts";
-import { NoOpenCodeKey, openCodeBusy, OpenCodeServer, opencodePort, startOpenCode, stopOpenCode } from "./vm/opencode.ts";
+import { NoOpenCodeKey, openCodeBusy, OpenCodeServer, opencodePort, removeWorktreeProgram, startOpenCode, stopOpenCode, worktreeName, worktreePath } from "./vm/opencode.ts";
 import { syncSkills } from "./vm/skills.ts";
-import { checkoutRoot, credentialsFingerprint, prepareVm, quote, readCodexAuth, resolveT3Version, startT3, t3Port, writeCodexAuth, writeCredentials, type VmCredentials } from "./vm/runtime.ts";
+import { checkoutRoot, credentialsFingerprint, prepareVm, quote, readCodexAuth, runProgram, resolveT3Version, startT3, t3Port, writeCodexAuth, writeCredentials, type VmCredentials } from "./vm/runtime.ts";
 
 type FleetEvents = {
   /** A VM's T3 server is connected and subscribed. */
@@ -746,8 +747,8 @@ export class Fleet extends EventEmitter<FleetEvents> {
     const vm = this.store.vm(vmId);
     const box = this.box(vmId);
     if (!vm || !box) throw new Error(`VM ${vmId} is not awake.`);
-    // VM Bridge gives each project one VM's OpenCode: its primary's.
-    const checkout = this.store.projects().find((project) => primaryVm(project)?.vmId === vmId)?.vms[0]?.checkoutPath ?? checkoutRoot;
+    // It starts in the checkout this VM holds. Clients can work in any folder on the VM, such as a worktree.
+    const checkout = this.store.projects().flatMap((project) => project.vms).find((entry) => entry.vmId === vmId)?.checkoutPath ?? checkoutRoot;
     const password = vm.opencodePassword ?? newToken();
     if (!vm.opencodePassword) this.store.updateVm(vmId, { opencodePassword: password });
     const started = performance.now();
@@ -954,6 +955,59 @@ export class Fleet extends EventEmitter<FleetEvents> {
       await this.register(backend, project, checkoutPath);
       this.store.setCheckout(projectId, vmId, checkoutPath);
       this.emit("changed");
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Makes a worktree on a new `opencode/<name>` branch in the project's checkout on this awake VM, from origin's `base`
+   * when it has that branch, else origin's default branch. Returns the branch it started from.
+   */
+  async worktree(vmId: string, projectId: string, base: string | null): Promise<{ name: string; path: string; branch: string; base: string }> {
+    const box = this.boxes.get(vmId);
+    const checkout = this.project(projectId).vms.find((entry) => entry.vmId === vmId)?.checkoutPath;
+    if (!box || !checkout) throw new Error(`VM ${vmId} is not ready.`);
+    const name = randomBytes(4).toString("hex");
+    const path = worktreePath(checkout, name);
+    const branch = `opencode/${name}`;
+    const named = base ? `git rev-parse --verify --quiet ${quote(`refs/remotes/origin/${base}`)} >/dev/null && base=${quote(base)}` : "";
+    const release = this.lease(vmId);
+    try {
+      const used = await runProgram(
+        box,
+        `. ${checkoutRoot}/.vmbridge/env
+cd ${quote(checkout)}
+GIT_TERMINAL_PROMPT=0 git fetch --quiet origin
+base=""
+${named}
+[ -n "$base" ] || base="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+[ -n "$base" ] || base="$(git rev-parse --abbrev-ref HEAD)"
+mkdir -p ${quote(path.slice(0, path.lastIndexOf("/")))}
+git worktree add --quiet -b ${quote(branch)} ${quote(path)} "origin/$base" >&2
+printf '%s' "$base"`,
+        "Making a worktree",
+      );
+      return { name, path, branch, base: used };
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Removes a worktree `worktree` made once nothing in it would be lost (see `removeWorktreeProgram`). It stays while an
+   * OpenCode agent runs on the VM, which may be working in it, and when the VM is asleep, which is not worth waking for.
+   * Answers whether it is gone.
+   */
+  async removeWorktree(vmId: string, projectId: string, name: string): Promise<boolean> {
+    const box = this.boxes.get(vmId);
+    const checkout = this.project(projectId).vms.find((entry) => entry.vmId === vmId)?.checkoutPath;
+    if (!box || !checkout || !worktreeName.test(name)) return false;
+    const release = this.lease(vmId);
+    try {
+      if (await openCodeBusy(box)) return false;
+      const answer = await runProgram(box, removeWorktreeProgram(checkout, name), "Removing a worktree");
+      return answer === "removed";
     } finally {
       release();
     }

@@ -5,6 +5,7 @@ import { parseArgs } from "node:util";
 import { compiled, dashboardKey, dataDir, defaultPort, start, version } from "@vmbridge/server";
 import { pidFile, restartSignal, runningPid, stopProcess } from "./process.ts";
 import { protectLog, service, serviceAddresses } from "./service.ts";
+import { login, openCode } from "./opencode.ts";
 import { update, updateFromDashboard } from "./update.ts";
 
 const help = `VM Bridge ${version}
@@ -16,6 +17,10 @@ Usage:
   vmbridge service install [--host] [--port]           Run VM Bridge in the background at login
   vmbridge service uninstall                           Remove the background service
   vmbridge password                                    Set a new dashboard password
+  vmbridge opencode [--branch <name>]                  Open OpenCode on a VM, in a new worktree of this repository
+  vmbridge login <pairing link>                        Sign this terminal in to VM Bridge on another machine
+
+\`vb\` is a short name for \`vmbridge\`.
 
 VM Bridge listens on this machine and on Tailscale. Turn on the local network in Settings > Addresses,
 or pass --host (or set VMBRIDGE_HOST) to listen on one address only: --host 0.0.0.0 is every network.
@@ -192,6 +197,7 @@ async function main() {
       host: { type: "string" },
       port: { type: "string" },
       check: { type: "boolean" },
+      branch: { type: "string" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
     },
@@ -209,6 +215,10 @@ async function main() {
       return update({ check: values.check === true });
     case "password":
       return ensureKey({ force: true });
+    case "opencode":
+      return openCode({ branch: values.branch });
+    case "login":
+      return login(subcommand);
     case "service":
       if (subcommand === "install") {
         await ensureKey();

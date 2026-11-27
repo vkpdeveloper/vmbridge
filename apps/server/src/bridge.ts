@@ -10,6 +10,7 @@ import { Fleet } from "./fleet.ts";
 import { Clones } from "./gateway/clones.ts";
 import { FileTrees } from "./gateway/files.ts";
 import { T3Gateway } from "./gateway/http.ts";
+import { openCodeLauncher } from "./gateway/opencode-launch.ts";
 import { OpenCodeGateway } from "./gateway/opencode.ts";
 import { Hub } from "./gateway/hub.ts";
 import { RemoteBranches } from "./gateway/repos.ts";
@@ -78,8 +79,9 @@ export function openBridge(runtime: BridgeRuntime) {
     if (store.vm(vmId)?.state === "sleeping") void files.refresh(store.projects().filter((project) => project.vms.some((entry) => entry.vmId === vmId)));
   });
   const rpc = new Rpc(hub, clones, branches, traffic, () => secrets.has("github.token"), files);
-  const gateway = new T3Gateway(hub, rpc, clients);
-  const opencode = new OpenCodeGateway(store, fleet, traffic, () => Boolean(settings.get("agentProfiles").opencode));
+  const hasOpenCodeKey = () => Boolean(settings.get("agentProfiles").opencode);
+  const gateway = new T3Gateway(hub, rpc, clients, openCodeLauncher({ store, hub, clones, traffic, hasKey: hasOpenCodeKey }));
+  const opencode = new OpenCodeGateway(store, fleet, traffic, hasOpenCodeKey);
   const auth = new DashboardAuth(db, secrets, runtime.passwords);
   const watch = new Watch({
     links: new WatchLinks(db, encryption),

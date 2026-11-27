@@ -62,6 +62,8 @@ if ! version="$("$tmp" --version 2>/dev/null)"; then
 fi
 mv "$tmp" "$dir/vmbridge"
 trap - EXIT
+# `vb` is its short name. Another program already called vb is left alone.
+if [ ! -e "$dir/vb" ] || [ "$(readlink "$dir/vb")" = vmbridge ]; then ln -sf vmbridge "$dir/vb"; fi
 
 echo "Installed VM Bridge $version to $dir/vmbridge"
 
@@ -75,5 +77,5 @@ case ":$PATH:" in
 esac
 
 echo
-echo "Start it with: vmbridge"
+echo "Start it with: vmbridge (or vb)"
 echo "Keep it running in the background with: vmbridge service install"
