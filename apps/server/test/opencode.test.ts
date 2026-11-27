@@ -24,6 +24,20 @@ const vm = Bun.serve({
   fetch(request) {
     const url = new URL(request.url);
     asked.push({ path: url.pathname + url.search, headers: request.headers });
+    if (url.pathname === "/api/event") {
+      // Two of OpenCode's events, the first split across chunks.
+      const chunks = ['data: {"id":"evt_1","type":"server.', 'connected","data":{}}\n\n', 'data: {"id":"evt_2","type":"x","data":{}}\n\n'];
+      return new Response(
+        new ReadableStream({
+          async pull(controller) {
+            const chunk = chunks.shift();
+            if (chunk) controller.enqueue(new TextEncoder().encode(chunk));
+            else controller.close();
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    }
     return Response.json({ path: url.pathname }, { status: upstreamStatus, headers: { "set-cookie": `session=${vmPassword}` } });
   },
 });
@@ -250,6 +264,29 @@ describe("OpenCode gateway", () => {
     expect(response.headers.get("retry-after")).toBe("10");
     expect(calls.place).toEqual([]);
     expect(calls.wake).toBe(0);
+  });
+
+  test("an event stream gets a toast naming the VM, for the folder the app works in, between OpenCode's events", async () => {
+    const { gateway, store } = setup();
+    store.setCheckout("p1", "vm1", "/workspace/app");
+    const auth = { headers: { authorization: basic(projectPassword) } };
+    for (const [path, directory] of [
+      ["/opencode/p1/api/event", "/workspace/app"],
+      ["/opencode/p1/w/vm1/ab12cd34/api/event", "/workspace/.worktrees/app/ab12cd34"],
+    ] as const) {
+      const frames = (await (await send(gateway, path, auth)).text()).split("\n\n").filter(Boolean);
+      expect(frames.filter((frame) => !frame.includes("tui.toast.show"))).toEqual([
+        'data: {"id":"evt_1","type":"server.connected","data":{}}',
+        'data: {"id":"evt_2","type":"x","data":{}}',
+      ]);
+      const toast = frames.findIndex((frame) => frame.includes("tui.toast.show"));
+      expect(toast).toBeGreaterThan(0);
+      const event = JSON.parse(frames[toast]!.slice("data: ".length));
+      expect(event.id).toStartWith("evt_");
+      expect(event.location).toEqual({ directory });
+      expect(event.data).toMatchObject({ title: "VM Bridge", variant: "info" });
+      expect(event.data.message).toStartWith("Running on vm1 (");
+    }
   });
 
   test("a VM that does not answer gets a fixed error naming nothing of the VM", async () => {

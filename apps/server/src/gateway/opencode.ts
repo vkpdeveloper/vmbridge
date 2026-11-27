@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { BudgetReached } from "../budget.ts";
 import { message, NoProvider, type Fleet } from "../fleet.ts";
+import { providers } from "../providers/index.ts";
 import { primaryVm, type Store } from "../store.ts";
 import type { Traffic } from "../traffic.ts";
 import { cliVersion, NoOpenCodeKey, OpenCodeUnreachable, worktreeName, worktreePath, type OpenCodeServer } from "../vm/opencode.ts";
@@ -147,6 +148,37 @@ function preflight(request: Request) {
       vary: "Origin",
     },
   });
+}
+
+const endsEvent = (chunk: Uint8Array) => chunk.length >= 2 && chunk[chunk.length - 2] === 10 && chunk[chunk.length - 1] === 10;
+
+/**
+ * OpenCode's terminal app shows a `tui.toast.show` event as a toast when it names the folder the app works in. One goes
+ * into each event stream after OpenCode's first event, so the app says which VM it runs on. It goes in only where a
+ * chunk ends an event, so it never splits one of OpenCode's.
+ */
+export function withToast(response: Response, directory: string, message: string): Response {
+  if (!response.body || !response.headers.get("content-type")?.startsWith("text/event-stream")) return response;
+  const event = {
+    id: `evt_${randomBytes(12).toString("hex")}`,
+    created: Date.now(),
+    type: "tui.toast.show",
+    location: { directory },
+    data: { title: "VM Bridge", message, variant: "info", duration: 5_000 },
+  };
+  const frame = new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
+  let pending = true;
+  const body = response.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        controller.enqueue(chunk);
+        if (!pending || !endsEvent(chunk)) return;
+        pending = false;
+        controller.enqueue(frame);
+      },
+    }),
+  );
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
 /** Resolves to null when `promise` takes longer than `ms`. It keeps running, and a late failure is not unhandled. */
@@ -387,7 +419,12 @@ export class OpenCodeGateway {
     if (target.worktree) this.noteUse(project.id, target.worktree.name, request, pathname);
     const path = folder ? this.atWorktree(target.path, request.method, folder) : target.path;
     if (upgrade) return this.socket(request, relay, vmId, server, path, seen);
-    return this.forward(request, vmId, server, path, seen);
+    const response = await this.forward(request, vmId, server, path, seen);
+    // The app works in the worktree, or else in the folder OpenCode started in on the VM: its checkout.
+    const directory = folder ?? project.vms.find((entry) => entry.vmId === vmId)?.checkoutPath;
+    const vm = this.store.vm(vmId);
+    if (request.method !== "GET" || pathname !== "/api/event" || !response.ok || !directory || !vm) return response;
+    return withToast(response, directory, `Running on ${vm.name} (${providers[vm.provider].label})`);
   }
 
   /**
