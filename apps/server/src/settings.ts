@@ -1,7 +1,8 @@
 import type { Sql } from "./sql.ts";
 import { machineNameMaxLength, type AgentFeedbackMode, type AgentKind, type GitHubAccount, type ProviderId, type RepoRule, type VmSize } from "@vmbridge/contracts";
 import { Encryption } from "./encryption.ts";
-import type { ServerConfig } from "./gateway/types.ts";
+import type { KeybindingRule } from "./gateway/keybindings.ts";
+import type { ServerConfig, Wire } from "./gateway/types.ts";
 
 export interface ProviderPreference {
   enabled?: boolean;
@@ -33,6 +34,10 @@ interface SettingValues {
   shellSequence: number;
   /** T3 agent provider switches and display names set from T3's settings screen. */
   agentPreferences: Record<string, ProviderPreference>;
+  /** Keyboard shortcuts saved from T3's settings, as T3's `keybindings.json` holds them (see gateway/keybindings.ts). */
+  keybindings: KeybindingRule[];
+  /** T3 settings saved from T3's settings screen, set on every VM (see gateway/fleet-settings.ts). */
+  t3Settings: Wire;
   /** T3's agent feedback mode on every VM. T3 ships it off. */
   agentFeedback: AgentFeedbackMode;
   /** The sign-in profile each agent uses on every VM (see agent-auth/profiles.ts). */
@@ -87,6 +92,8 @@ const defaults: { [K in keyof SettingValues]: () => SettingValues[K] } = {
   github: () => null,
   shellSequence: () => 0,
   agentPreferences: () => ({}),
+  keybindings: () => [],
+  t3Settings: () => ({}),
   agentFeedback: () => "off",
   agentProfiles: () => ({}),
   instructionSync: () => ({}),

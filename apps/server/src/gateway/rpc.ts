@@ -8,6 +8,7 @@ import type { FileTrees } from "./files.ts";
 import { isHeldCommand } from "./held.ts";
 import type { Hub } from "./hub.ts";
 import { iconAssetUrl } from "./icons.ts";
+import { KeybindingError, removeKeybinding, upsertKeybinding, type KeybindingRule, type ResolvedKeybinding } from "./keybindings.ts";
 import { projectForPath, projectRoot } from "./paths.ts";
 import { githubName, githubRepository, type RemoteBranches } from "./repos.ts";
 import { str, type Row, type Wire } from "./types.ts";
@@ -117,7 +118,8 @@ export class Rpc {
       "server.discoverSourceControl": (call) => this.reply(call, this.sourceControl()),
       "server.updateSettings": (call) => {
         try {
-          this.reply(call, hub.updateAgentPreferences(call.payload));
+          const { providerInstanceMutation, patch } = call.payload;
+          this.reply(call, providerInstanceMutation ? hub.updateAgentPreferences(call.payload) : hub.updateFleetSettings((patch ?? {}) as Wire));
         } catch (error) {
           call.client.send(
             tagged(call.id, {
@@ -130,6 +132,8 @@ export class Rpc {
           );
         }
       },
+      "server.upsertKeybinding": (call) => this.keybindings(call, (saved, defaults) => upsertKeybinding(saved, defaults, call.payload)),
+      "server.removeKeybinding": (call) => this.keybindings(call, (saved) => removeKeybinding(saved, call.payload)),
       "server.refreshProviders": async (call) => this.reply(call, { providers: await hub.refreshAgents(call.payload) }),
       "server.updateProvider": async (call) => this.reply(call, { providers: await hub.updateAgent(call.payload) }),
       subscribeServerConfig: (call) => this.serverConfig(call),
@@ -322,6 +326,16 @@ export class Rpc {
       if (!this.hub.settings.get("defaultProvider")) throw new NoProvider();
     }
     return this.hub.config() as Wire & { settings?: Wire };
+  }
+
+  /** Saves a shortcut change. T3 reports a shortcut it can't save as a `keybindings.json` parse error. */
+  private keybindings(call: Call, change: (saved: KeybindingRule[], defaults: ResolvedKeybinding[]) => KeybindingRule[]) {
+    try {
+      this.reply(call, this.hub.updateKeybindings(change));
+    } catch (error) {
+      if (!(error instanceof KeybindingError)) throw error;
+      call.client.send(tagged(call.id, { _tag: "KeybindingsConfigParseError", configPath: "VM Bridge", detail: error.message }));
+    }
   }
 
   private sourceControl() {

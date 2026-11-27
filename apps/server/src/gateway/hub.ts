@@ -14,9 +14,11 @@ import { T3Rejected, type Backend, type Frame } from "../vm/backend.ts";
 import type { Stats } from "../vm/stats.ts";
 import { defaultAgents, pendingAgent, presentAgent, type AgentReport } from "./agents.ts";
 import { Attachments, maxUploadBytes } from "./attachments.ts";
+import { hasSettings, mergeSettings, refusedSettings } from "./fleet-settings.ts";
 import type { FileTrees, Worktree } from "./files.ts";
 import { applyHeldCommand, nextTurnCommandTypes } from "./held.ts";
 import { ProjectIcons } from "./icons.ts";
+import { resolveKeybindings, type KeybindingRule, type ResolvedKeybinding } from "./keybindings.ts";
 import { isPathKey, projectForPath, projectRoot, translate, vmForPath, within, type Environments } from "./paths.ts";
 import { repositoryIdentity } from "./repos.ts";
 import { threadStamp } from "./saved.ts";
@@ -58,6 +60,8 @@ export const bridgeScopes = [
   "source-control:write",
   "access:read",
   "providers:manage",
+  // Shortcuts and the settings in `fleetSettingKeys` are saved by VM Bridge. It refuses the rest by name.
+  "settings:write",
   // T3 clients show agents' browser tabs only with this scope. VM Bridge forwards what that takes, see `Rpc`.
   "preview:operate",
 ];
@@ -175,6 +179,7 @@ export class Hub extends EventEmitter<HubEvents> {
       // A save while the VM connected reached neither it (not yet awake) nor the mode it was sent.
       const backend = fleet.backend(vmId);
       if (backend && this.feedbackModes.get(vmId) !== settings.get("agentFeedback")) void this.applyAgentFeedback(vmId, backend);
+      if (backend) void this.applyFleetSettings(vmId, backend);
       void this.replayHeld(vmId);
     });
     fleet.on("offline", (vmId) => {
@@ -221,6 +226,7 @@ export class Hub extends EventEmitter<HubEvents> {
     this.feedbackModes.set(vmId, (config.settings?.agentFeedback as Wire | undefined)?.mode);
     // Before the VM counts as awake, so the turns that woke it already use the mode.
     if (this.feedbackModes.get(vmId) !== this.settings.get("agentFeedback")) await this.applyAgentFeedback(vmId, backend);
+    await this.applyFleetSettings(vmId, backend);
 
     backend.request(
       "subscribeServerConfig",
@@ -231,6 +237,8 @@ export class Hub extends EventEmitter<HubEvents> {
           if (event.type === "snapshot") this.configs.set(vmId, event.config as ServerConfig);
           else if (event.type === "providerStatuses" && current) {
             current.providers = (event.payload as { providers: ProviderEntry[] }).providers;
+          } else if (event.type === "settingsUpdated" && current) {
+            current.settings = (event.payload as { settings: Wire }).settings;
           }
           const latest = this.configs.get(vmId);
           if (latest) this.store.saveSnapshot(vmId, "config", latest);
@@ -588,7 +596,9 @@ export class Hub extends EventEmitter<HubEvents> {
     base.auth = bridgeAuth;
     const agents = this.agents();
     base.providers = agents;
+    base.keybindings = resolveKeybindings(this.defaultKeybindings(base), this.settings.get("keybindings"));
     if (base.settings) {
+      base.settings = mergeSettings(base.settings, this.settings.get("t3Settings"));
       base.settings.addProjectBaseDirectory = "/projects";
       base.settings.providerInstances = Object.fromEntries(
         agents.map((agent) => [agent.instanceId, { driver: agent.driver, displayName: agent.displayName, enabled: agent.enabled }]),
@@ -605,6 +615,55 @@ export class Hub extends EventEmitter<HubEvents> {
     base.threadSnapshotPagination = true;
     base.serverTime = new Date().toISOString();
     return base;
+  }
+
+  /**
+   * T3's default shortcuts, from the config a VM reported. T3 seeds each VM's `keybindings.json` with its defaults and
+   * VMs never get the shortcuts saved here, so what a VM reports is its release's defaults.
+   */
+  private defaultKeybindings(config = [...this.configs.values()][0]): ResolvedKeybinding[] {
+    return Array.isArray(config?.keybindings) ? (config.keybindings as ResolvedKeybinding[]) : [];
+  }
+
+  /** Saves the shortcuts `change` makes and returns what `server.upsertKeybinding` does: the shortcuts clients see. */
+  updateKeybindings(change: (saved: KeybindingRule[], defaults: ResolvedKeybinding[]) => KeybindingRule[]) {
+    const defaults = this.defaultKeybindings();
+    const saved = change(this.settings.get("keybindings"), defaults);
+    this.settings.set("keybindings", saved);
+    this.emit("config");
+    return { keybindings: resolveKeybindings(defaults, saved), issues: [] };
+  }
+
+  /**
+   * Saves T3 settings changed from T3's settings screen and sets them on every awake VM. Sleeping and new VMs get them
+   * as they connect. Throws naming the settings it can't save, without saving any.
+   */
+  updateFleetSettings(patch: Wire): Wire {
+    const refused = refusedSettings(patch, (this.config().settings ?? {}) as Wire);
+    if (refused.length > 0) throw new Error(refused.join(", "));
+    this.settings.set("t3Settings", mergeSettings(this.settings.get("t3Settings"), patch));
+    for (const vmId of this.fleet.connected()) {
+      const backend = this.fleet.backend(vmId);
+      if (backend) void this.applyFleetSettings(vmId, backend);
+    }
+    this.emit("config");
+    return this.config().settings as Wire;
+  }
+
+  /** Sets the saved T3 settings on a VM whose T3 does not have them yet. Never throws. */
+  private async applyFleetSettings(vmId: string, backend: Backend) {
+    const saved = this.settings.get("t3Settings");
+    if (Object.keys(saved).length === 0 || hasSettings(this.configs.get(vmId)?.settings, saved)) return;
+    try {
+      const settings = await backend.call<Wire>("server.updateSettings", { patch: saved }, 15_000);
+      const config = this.configs.get(vmId);
+      if (config && settings && typeof settings === "object") {
+        config.settings = settings;
+        this.store.saveSnapshot(vmId, "config", config);
+      }
+    } catch (error) {
+      console.warn(`[hub] could not set T3 settings on VM ${vmId}: ${message(error)}`);
+    }
   }
 
   /** Agents across the fleet, preferring what a connected VM (or the given one) reports. */
