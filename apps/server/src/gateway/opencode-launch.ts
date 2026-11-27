@@ -64,6 +64,17 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
         }
         let worktree: { name: string; path: string; branch: string; base: string | null };
         let sessionId: string | null = null;
+        // OpenCode starts beside the worktree being made. What it does shows once its step does, not under the worktree's.
+        let opening: Promise<unknown> | undefined;
+        let openingDetail: string | null = null;
+        let showOpening = false;
+        const startOpenCode = (vmId: string) => {
+          opening = hub.fleet.opencode(vmId, (text) => {
+            openingDetail = text;
+            if (showOpening) detail(text);
+          });
+          opening.catch(() => {});
+        };
         if (resume) {
           // Where VM Bridge noted it, so only that VM wakes. Worktrees from before it noted them are looked for.
           const noted = store.openCodeWorktrees(project.id).find((row) => row.name === resume);
@@ -84,12 +95,16 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
           const placement = await hub.placeOpenCode(project.id, step, detail);
           vmId = placement.vmId;
           if (placement.notice) send({ notice: placement.notice });
+          startOpenCode(vmId);
           step("Making a worktree");
           worktree = await hub.fleet.worktree(vmId, project.id, branch);
           store.addOpenCodeWorktree({ projectId: project.id, vmId, ...worktree });
         }
         step("Starting OpenCode");
-        await hub.fleet.opencode(vmId, detail);
+        showOpening = true;
+        if (openingDetail) detail(openingDetail);
+        if (!opening) startOpenCode(vmId);
+        await opening;
         traffic.record({ kind: "system", operation: `OpenCode worktree for ${project.title}`, vmId, status: "ok", durationMs: Math.round(performance.now() - started) });
         send({
           ready: {
