@@ -185,7 +185,7 @@ export const copy = {
     steps: [
       "Add an OpenCode API key in Accounts. OpenCode on the VMs uses its models.",
       "Open a VM on the dashboard and choose Connect OpenCode next to its repository.",
-      "In the OpenCode app, choose Connect to a server and paste the address and password.",
+      "In the OpenCode app, choose Connect to a server and paste the address and password, or scan the dialog's QR code from your phone.",
     ],
     /** 80. Before the terminal command. */
     terminal: "In a terminal, put the password in OPENCODE_PASSWORD and run:",
@@ -194,6 +194,7 @@ export const copy = {
     notes: [
       "The first request wakes the VM. If OpenCode gives up while it wakes, connect again.",
       "Agents keep running after OpenCode closes. The VM sleeps once no OpenCode agent is running and nothing has used it for the idle time.",
+      "Each QR code works once, for 10 minutes. The QR code appears only when VM Bridge has an address other devices can reach.",
       "New password, in the same dialog, signs out every OpenCode client of that project.",
       "OpenCode uses only the OpenCode key. Codex and Claude sign-ins stay with T3 Code.",
     ],

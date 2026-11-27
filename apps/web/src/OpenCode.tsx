@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CommandLineIcon } from "@hugeicons/core-free-icons";
+import { QRCodeSVG } from "qrcode.react";
 import type { OpenCodeConnection, ProjectInfo } from "@vmbridge/contracts";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -14,10 +15,23 @@ const connectCommand = (url: string, password: string) => `OPENCODE_PASSWORD='${
 /** A project's OpenCode address and password, fetched as the dialog opens. The first open makes the password. */
 export function ConnectOpenCode({ project }: { project: ProjectInfo }) {
   const [connection, setConnection] = useState<OpenCodeConnection | null>(null);
+  const [open, setOpen] = useState(false);
   const action = useAction();
   const load = (renew: boolean) => void action.run(async () => setConnection(await api<OpenCodeConnection>(`/projects/${project.id}/opencode`, { body: { renew } })));
+  const pairing = connection?.pairing;
+  // A pairing code works for ten minutes, so an open dialog swaps in a new one before it ends.
+  useEffect(() => {
+    if (!open || !pairing) return;
+    const timer = setTimeout(() => load(false), (pairing.expiresInSeconds - 15) * 1000);
+    return () => clearTimeout(timer);
+  }, [open, pairing]);
   return (
-    <Dialog onOpenChange={(open) => open && load(false)}>
+    <Dialog
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) load(false);
+      }}
+    >
       <DialogTrigger asChild>
         <Button variant="outline" size="sm">
           Connect OpenCode
@@ -53,6 +67,18 @@ export function ConnectOpenCode({ project }: { project: ProjectInfo }) {
                 <CopyButton value={connection.password} label="Copy password" />
               </ItemActions>
             </Item>
+            {connection.pairing && (
+              <Item variant="outline" size="sm">
+                <div className="shrink-0 rounded-md bg-white p-2">
+                  {/* The same JSON `opencode pair` puts in its QR code. */}
+                  <QRCodeSVG value={JSON.stringify({ code: connection.pairing.code, urls: connection.pairing.urls })} size={128} />
+                </div>
+                <ItemContent className="min-w-0">
+                  <ItemTitle>Scan with your phone</ItemTitle>
+                  <ItemDescription className="line-clamp-none">In OpenCode, connect to a server and scan this code. It works once.</ItemDescription>
+                </ItemContent>
+              </Item>
+            )}
           </ItemGroup>
         )}
         <div className="flex items-center gap-3">

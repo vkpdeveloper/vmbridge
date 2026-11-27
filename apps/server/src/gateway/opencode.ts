@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { BudgetReached } from "../budget.ts";
 import { message, NoProvider, type Fleet } from "../fleet.ts";
 import { primaryVm, type Store } from "../store.ts";
@@ -25,7 +25,12 @@ const ticketed = [
   /^\/api\/experimental\/client-mcp$/,
 ];
 
-/** Pairing would hand out a credential for the VM's own server, which only VM Bridge holds. */
+/** As `opencode pair`'s codes: one use, for ten minutes. */
+const pairingMs = 10 * 60_000;
+/** Where OpenCode's clients trade a pairing code for a password. VM Bridge answers it, under the project's address. */
+const connectPath = /^\/auth\/connect\/([^/]+)$/;
+
+/** Pairing on the VM would hand out a credential for its own server, which only VM Bridge holds. */
 const blocked = (path: string) => path === "/api/pair" || path.startsWith("/api/pair/") || path.startsWith("/auth/");
 
 /**
@@ -134,6 +139,7 @@ export class OpenCodeGateway {
   private readonly ends = new Map<string, AbortController>();
   private readonly relays = new Set<{ vmId: string; end: (code: number, reason: string) => void }>();
   private readonly touched = new Map<string, number>();
+  private readonly pairings = new Map<string, { projectId: string; expires: number }>();
 
   constructor(
     private readonly store: Store,
@@ -167,6 +173,29 @@ export class OpenCodeGateway {
     const project = this.store.project(projectId);
     const vmId = project && primaryVm(project)?.vmId;
     if (vmId) this.end(vmId, "The password changed");
+    for (const [code, pairing] of this.pairings) if (pairing.projectId === projectId) this.pairings.delete(code);
+  }
+
+  /** A code an OpenCode client trades once, at the project's address, for its password, as a scanned `opencode pair` QR code does. */
+  pairingCode(projectId: string) {
+    const now = Date.now();
+    for (const [code, pairing] of this.pairings) if (pairing.expires <= now) this.pairings.delete(code);
+    const code = randomBytes(16).toString("base64url");
+    this.pairings.set(code, { projectId, expires: now + pairingMs });
+    return { code, expiresInSeconds: pairingMs / 1000 };
+  }
+
+  /** Answers as OpenCode's own server does for a client that wants JSON. The client asks from any origin, as a web app. */
+  private redeem(request: Request, projectId: string, code: string, seen: Seen) {
+    const pairing = this.pairings.get(code);
+    const password = pairing && pairing.projectId === projectId && pairing.expires > Date.now() ? this.store.openCodePassword(projectId) : null;
+    const headers = { "access-control-allow-origin": request.headers.get("origin") ?? "*", "cache-control": "no-store", vary: "Origin" };
+    if (!password) {
+      seen.refusal = "expired pairing code";
+      return Response.json({ _tag: "UnauthorizedError", message: "Pairing link expired or already used" }, { status: 401, headers });
+    }
+    this.pairings.delete(code);
+    return Response.json({ token: password }, { headers });
   }
 
   private touch(vmId: string) {
@@ -234,7 +263,10 @@ export class OpenCodeGateway {
     if (!target) return notFound();
     const pathname = target.path.split("?")[0]!;
     // `..` in any spelling, `%2e%2e` too, or a second `//`, would leave the path VM Bridge checked.
-    if (new URL(pathname, "http://vm").pathname !== pathname || blocked(pathname)) return notFound();
+    if (new URL(pathname, "http://vm").pathname !== pathname) return notFound();
+    const code = request.method === "GET" ? connectPath.exec(pathname)?.[1] : undefined;
+    if (code && target.projectId !== null) return this.redeem(request, target.projectId, code, seen);
+    if (blocked(pathname)) return notFound();
 
     const upgrade = request.headers.get("upgrade")?.toLowerCase() === "websocket";
     const password = givenPassword(request, url);
