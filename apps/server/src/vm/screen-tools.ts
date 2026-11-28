@@ -124,12 +124,21 @@ const path = require("path");
 
 const screen = process.argv[2];
 const env = { ...process.env, DISPLAY: process.env.DISPLAY || ":0" };
-const run = (command, args) =>
-  new Promise((resolve, reject) =>
-    execFile(command, args, { env, timeout: 20000, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) =>
-      error ? reject(new Error(String(stderr || error.message).trim())) : resolve(stdout),
-    ),
-  );
+const run = (command, args, timeout = 20000) =>
+  new Promise((resolve, reject) => {
+    try {
+      execFile(command, args, { env, timeout, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
+        if (!error) return resolve(stdout);
+        if (error.killed) return reject(new Error(command + " timed out after " + Math.round(timeout / 1000) + "s."));
+        const detail = String(stderr || "").trim();
+        if (detail) return reject(new Error(detail));
+        if (error.code === "ENOENT") return reject(new Error(command + " is not installed."));
+        return reject(new Error(command + " failed" + (typeof error.code === "number" ? " (exit " + error.code + ")." : ".")));
+      });
+    } catch {
+      reject(new Error(command + " failed."));
+    }
+  });
 const xdotool = (...args) => run("xdotool", args.map(String));
 const pixel = (value, name) => {
   if (!Number.isInteger(value) || value < 0) throw new Error(name + " must be a whole number of pixels, 0 or more.");
@@ -208,7 +217,9 @@ const tools = [
     inputSchema: { type: "object", properties: { text: { type: "string", maxLength: 10000 } }, required: ["text"] },
     async run({ text }) {
       if (typeof text !== "string") throw new Error("text must be a string.");
-      await xdotool("type", "--delay", 12, "--", text);
+      if (text.length > 10000) throw new Error("text must be at most 10000 characters.");
+      if (text.includes("\\0")) throw new Error("text must not contain null bytes.");
+      await run("xdotool", ["type", "--delay", "12", "--", text], 20000 + text.length * 24);
     },
   },
   {
@@ -216,6 +227,7 @@ const tools = [
     description: "Presses keys or chords, in xdotool names, such as Return, ctrl+s or alt+Tab. Separate several with spaces.",
     inputSchema: { type: "object", properties: { keys: { type: "string", maxLength: 200 } }, required: ["keys"] },
     async run({ keys }) {
+      if (typeof keys === "string" && keys.includes("\\0")) throw new Error("keys must not contain null bytes.");
       const names = typeof keys === "string" ? keys.split(/\\s+/).filter(Boolean) : [];
       if (!names.length) throw new Error("Name at least one key.");
       await xdotool("key", "--", ...names);
