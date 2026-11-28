@@ -5,6 +5,7 @@ import { openDatabase } from "../src/bun/sqlite.ts";
 import type { Fleet } from "../src/fleet.ts";
 import { T3Gateway } from "../src/gateway/http.ts";
 import { Hub } from "../src/gateway/hub.ts";
+import { bridgeJobs } from "../src/jobs.ts";
 import { Rpc, type RpcClient } from "../src/gateway/rpc.ts";
 import type { Wire } from "../src/gateway/types.ts";
 import { Settings } from "../src/settings.ts";
@@ -268,5 +269,74 @@ describe("attachments through VM Bridge", () => {
     expect(older.hub.descriptor().capabilities).toMatchObject({ attachmentUploads: false });
     expect(older.hub.descriptor().capabilities).not.toHaveProperty("fileAttachments");
     older.close();
+  });
+
+  test("scheduled attachment sweep reclaims expired uploads and their chunks while keeping fresh and active uploads", async () => {
+    const { hub, call, fetch, close } = setup({});
+    try {
+      const data = new TextEncoder().encode("abandon-me");
+      const expired = value(await call("attachments.createUploadUrl", { type: "file", name: "old.txt", mimeType: "text/plain", sizeBytes: data.byteLength }));
+      const fresh = value(await call("attachments.createUploadUrl", { type: "file", name: "new.txt", mimeType: "text/plain", sizeBytes: data.byteLength }));
+      expect((await fetch(String(expired.relativeUrl), { method: "POST", body: data })).status).toBe(204);
+      expect((await fetch(String(fresh.relativeUrl), { method: "POST", body: data })).status).toBe(204);
+
+      hub.store.db.run("UPDATE attachment_uploads SET expires_at = ? WHERE id = ?", Date.now() - 1, String(expired.attachmentId));
+      const jobs = bridgeJobs({
+        hub,
+        fleet: hub.fleet,
+        stats: { sampleAll: async () => {} } as never,
+        usage: { sync: () => {} } as never,
+        budget: { status: () => ({ level: "ok" }) } as never,
+        traffic: { record: () => {} } as never,
+        watch: { refresh: async () => {} } as never,
+      });
+      const sweepJob = jobs.find((job) => job.name === "attachment sweep");
+      expect(sweepJob).toBeDefined();
+      await sweepJob!.run();
+
+      expect(hub.store.db.one<{ n: number }>("SELECT COUNT(*) AS n FROM attachment_uploads WHERE id = ?", String(expired.attachmentId))?.n).toBe(0);
+      expect(hub.store.db.one<{ n: number }>("SELECT COUNT(*) AS n FROM attachment_chunks WHERE upload_id = ?", String(expired.attachmentId))?.n).toBe(0);
+      expect(hub.attachments.held(String(fresh.attachmentId))).toBeDefined();
+      expect(hub.store.db.one<{ n: number }>("SELECT COUNT(*) AS n FROM attachment_chunks WHERE upload_id = ?", String(fresh.attachmentId))?.n).toBe(1);
+
+      // A streaming upload claimed near its URL TTL extends its deadline so sweeps do not drop it mid-body.
+      const streaming = value(await call("attachments.createUploadUrl", { type: "file", name: "slow.txt", mimeType: "text/plain", sizeBytes: data.byteLength }));
+      const originalExpiry = Number(streaming.expiresAt);
+      let pushRest!: () => void;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(data.subarray(0, 4));
+          pushRest = () => {
+            controller.enqueue(data.subarray(4));
+            controller.close();
+          };
+        },
+      });
+      const uploading = fetch(String(streaming.relativeUrl), { method: "POST", body });
+      await Bun.sleep(0);
+      expect(hub.attachments.sweep(originalExpiry + 1)).toBe(0);
+      pushRest();
+      expect((await uploading).status).toBe(204);
+      expect(new Uint8Array(await hub.attachments.file(String(streaming.attachmentId))!.body.arrayBuffer())).toEqual(data);
+
+      // If an in-flight row disappears before completion, receive() does not report a false 204.
+      const removed = value(await call("attachments.createUploadUrl", { type: "file", name: "gone.txt", mimeType: "text/plain", sizeBytes: data.byteLength }));
+      let finishRemoved!: () => void;
+      const removedBody = new ReadableStream<Uint8Array>({
+        start(controller) {
+          finishRemoved = () => {
+            controller.enqueue(data);
+            controller.close();
+          };
+        },
+      });
+      const removedUpload = fetch(String(removed.relativeUrl), { method: "POST", body: removedBody });
+      await Bun.sleep(0);
+      hub.attachments.remove(String(removed.attachmentId));
+      finishRemoved();
+      expect((await removedUpload).status).toBe(404);
+    } finally {
+      close();
+    }
   });
 });

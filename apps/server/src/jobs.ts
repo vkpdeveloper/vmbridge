@@ -43,5 +43,7 @@ export function bridgeJobs(deps: { hub: Hub; fleet: Fleet; stats: Stats; usage: 
     },
     // Follows VM Bridge's address, such as a quick tunnel's new one, into the watch links VMs have.
     { name: "watch links", everyMs: 30_000, run: () => watch.refresh() },
+    // Reclaims expired uploads and their SQLite chunks even when no client mints a new upload URL.
+    { name: "attachment sweep", everyMs: 10 * 60_000, run: async () => void hub.attachments.sweep() },
   ];
 }

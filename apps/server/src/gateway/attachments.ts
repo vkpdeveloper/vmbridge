@@ -13,6 +13,8 @@ const maxImageBytes = 10 * 1024 * 1024;
 export const maxUploadBytes = 50 * 1024 * 1024;
 /** T3's `ATTACHMENT_UPLOAD_URL_TTL_MS`. */
 const uploadUrlMs = 10 * 60_000;
+/** How long an in-progress upload body may stream before a sweep reclaims an orphaned row. */
+const receiveMs = 60 * 60_000;
 /** How long an upload waits for the message that sends it, as long as T3 keeps its pending uploads. */
 const keepMs = 24 * 60 * 60_000;
 /** Durable Object SQL takes at most 2 MB in one value. */
@@ -60,7 +62,7 @@ export class Attachments {
       throw new Error("This attachment cannot be uploaded.");
     }
     const now = Date.now();
-    this.db.run("DELETE FROM attachment_uploads WHERE expires_at <= ?", now);
+    this.sweep(now);
     const id = `pending-${crypto.randomUUID()}${type === "file" ? idSuffix(name) : ""}`;
     const token = newToken();
     const expiresAt = now + uploadUrlMs;
@@ -81,10 +83,22 @@ export class Attachments {
     const clientId = row.clientId ?? undefined;
     const length = request.headers.get("content-length");
     if (length !== null && Number(length) !== row.sizeBytes) return { status: 400, clientId };
-    // Claimed first, so a second request to the same URL cannot mix its bytes in.
-    if (this.db.run("UPDATE attachment_uploads SET state = 'receiving' WHERE id = ? AND state = 'waiting'", row.id) !== 1) return { status: 404 };
+    // Claimed first with a streaming deadline so a second request cannot mix bytes in and sweeps keep active uploads alive.
+    const claimedAt = Date.now();
+    if (
+      this.db.run(
+        "UPDATE attachment_uploads SET state = 'receiving', expires_at = ? WHERE id = ? AND state = 'waiting' AND expires_at > ?",
+        claimedAt + receiveMs,
+        row.id,
+        claimedAt,
+      ) !== 1
+    ) {
+      return { status: 404 };
+    }
     try {
-      if (!(await this.store(row.id, row.sizeBytes, request.body))) {
+      const stored = await this.store(row.id, row.sizeBytes, request.body);
+      if (stored === "missing") return { status: 404, clientId };
+      if (stored === "bad-size") {
         this.db.run("DELETE FROM attachment_uploads WHERE id = ?", row.id);
         return { status: 400, clientId };
       }
@@ -92,12 +106,14 @@ export class Attachments {
       this.db.run("DELETE FROM attachment_uploads WHERE id = ?", row.id);
       throw error;
     }
-    this.db.run("UPDATE attachment_uploads SET state = 'ready', expires_at = ? WHERE id = ?", Date.now() + keepMs, row.id);
+    if (this.db.run("UPDATE attachment_uploads SET state = 'ready', expires_at = ? WHERE id = ? AND state = 'receiving'", Date.now() + keepMs, row.id) !== 1) {
+      return { status: 404, clientId };
+    }
     return { status: 204, clientId };
   }
 
-  /** Saves the body in chunks. False when it is not exactly `size` bytes. */
-  private async store(id: string, size: number, body: ReadableStream<Uint8Array> | null) {
+  /** Saves the body in chunks. Reports whether the body matched `size` or the upload row vanished mid-stream. */
+  private async store(id: string, size: number, body: ReadableStream<Uint8Array> | null): Promise<"ok" | "bad-size" | "missing"> {
     let received = 0;
     let seq = 0;
     let pending: Uint8Array[] = [];
@@ -114,7 +130,9 @@ export class Attachments {
       }
       pending = rest;
       pendingBytes -= bytes;
+      if (!this.db.one("SELECT 1 FROM attachment_uploads WHERE id = ? AND state = 'receiving'", id)) return false;
       this.db.run("INSERT INTO attachment_chunks (upload_id, seq, data) VALUES (?, ?, ?)", id, seq++, chunk);
+      return true;
     };
     const reader = body?.getReader();
     while (reader) {
@@ -123,19 +141,29 @@ export class Attachments {
       received += value.byteLength;
       if (received > size) {
         await reader.cancel();
-        return false;
+        return "bad-size";
       }
       pending.push(value);
       pendingBytes += value.byteLength;
-      while (pendingBytes >= chunkBytes) flush(chunkBytes);
+      while (pendingBytes >= chunkBytes) {
+        if (!flush(chunkBytes)) {
+          await reader.cancel();
+          return "missing";
+        }
+      }
     }
-    if (pendingBytes > 0) flush(pendingBytes);
-    return received === size;
+    if (pendingBytes > 0 && !flush(pendingBytes)) return "missing";
+    return received === size ? "ok" : "bad-size";
   }
 
   /** `attachments.delete`. */
   remove(attachmentId: string) {
     this.db.run("DELETE FROM attachment_uploads WHERE id = ?", attachmentId);
+  }
+
+  /** Drops expired uploads and their chunks so abandoned files do not linger until the next upload. */
+  sweep(now = Date.now()): number {
+    return this.db.run("DELETE FROM attachment_uploads WHERE expires_at <= ?", now);
   }
 
   /** An upload that is complete and still held here, as T3 would answer for its own pending upload. */
