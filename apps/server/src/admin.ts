@@ -252,7 +252,7 @@ export class Admin {
       try {
         return json(analyticsReport(store, this.deps.usage, from, to, timeZone));
       } catch (error) {
-        if (error instanceof RangeError) throw new BadRequest("Unknown time zone.");
+        if (error instanceof RangeError) throw new BadRequest(error.message);
         throw error;
       }
     }
