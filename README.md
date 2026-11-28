@@ -296,6 +296,10 @@ it is asleep. Clicking the pull request, its checks or the repository opens it o
 an agent starts in the worktree shows up there too, at a `localhost` address on your computer that
 VM Bridge relays to the VM, so its page and live reload work as if it ran locally.
 
+The dashboard lists each VM's OpenCode sessions beside its T3 threads, with the model, the repository
+and branch, and whether the agent is working. Clicking one copies the `vb opencode resume` command
+that reopens its worktree.
+
 It needs an OpenCode API key in **Accounts** and OpenCode 2 on your computer
 (`npm install -g @opencode/cli`). On the computer VM Bridge runs on, the command signs itself in; on
 another, run `vb login` once with a pairing link from **Devices**. When you close OpenCode, the

@@ -129,7 +129,7 @@ export async function start(options: StartOptions = {}) {
       if (!migrated) markMigrated();
     },
   });
-  const { settings, key: encryptionKey, secrets, traffic, skills, fleet, stats, usage, budget, hub, gateway, opencode, auth, watch } = bridge;
+  const { settings, key: encryptionKey, secrets, traffic, skills, fleet, stats, openCodeSessions, usage, budget, hub, gateway, opencode, auth, watch } = bridge;
   // Defined before the server starts listening; its listener only opens once the tunnel is on.
   let tunnel: CloudflareTunnel;
   let listeners: Listeners<Socket>;
@@ -246,7 +246,7 @@ export async function start(options: StartOptions = {}) {
   const addresses = { name: "addresses", everyMs: 5_000, run: () => listeners.apply() };
   if (compiled) void release.job.run();
   const stopJobs = runJobs([
-    ...bridgeJobs({ hub, fleet, stats, usage, budget, traffic, watch }),
+    ...bridgeJobs({ hub, fleet, stats, openCodeSessions, usage, budget, traffic, watch }),
     localSkills,
     ...(host ? [] : [addresses]),
     ...(compiled ? [release.job] : []),

@@ -1,10 +1,10 @@
 // The bundle adds <style> tags at runtime (toasts, the canvas) and embeds its fonts as data: URLs. GitHub serves
-// account avatars.
+// account avatars, and models.dev the logos of the AI providers OpenCode sessions use.
 const contentSecurityPolicy = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: https://avatars.githubusercontent.com",
+  "img-src 'self' data: https://avatars.githubusercontent.com https://models.dev",
   "font-src 'self' data:",
   "connect-src 'self'",
   "object-src 'none'",

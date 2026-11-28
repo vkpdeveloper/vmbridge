@@ -365,6 +365,26 @@ describe("waking", () => {
     await until(() => t3.sockets.size === 0);
   });
 
+  test("looking for a running OpenCode never starts one, runs nothing on the VM, and skips VMs it never ran on", async () => {
+    const { fleet, store, calls } = setup();
+    const vm = await fleet.create();
+    await fleet.ensure(vm.id);
+    calls.length = 0;
+    expect(await fleet.runningOpenCode(vm.id)).toBeNull();
+    expect(calls).toEqual([]);
+
+    // After a restart VM Bridge holds no connection: one preview makes it, and later looks reuse it.
+    store.updateVm(vm.id, { opencodePassword: "pw" });
+    expect(await fleet.runningOpenCode(vm.id)).not.toBeNull();
+    expect(await fleet.runningOpenCode(vm.id)).not.toBeNull();
+    expect(calls).toEqual(["preview"]);
+
+    await fleet.sleep(vm.id);
+    calls.length = 0;
+    expect(await fleet.runningOpenCode(vm.id)).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
   test("waking a paused VM takes one command in it, and using a connected VM takes none", async () => {
     const { fleet, calls } = setup();
     const vm = await fleet.create();

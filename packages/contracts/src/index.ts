@@ -186,6 +186,25 @@ export interface VmSession {
   updatedAt: string | null;
 }
 
+/** A session in the OpenCode server a VM runs for `vb opencode` and other OpenCode clients. */
+export interface VmOpenCodeSession {
+  id: string;
+  title: string;
+  projectId: string;
+  repository: string;
+  /** The branch its worktree is on, when VM Bridge knows one worth showing. */
+  branch: string | null;
+  /** The provider's ID, which names its models.dev logo, and its name, as OpenCode's catalog has them. */
+  provider: { id: string; name: string } | null;
+  /** The model's name as OpenCode's catalog has it, when the session has a model. */
+  model: string | null;
+  working: boolean;
+  /** Ms since the epoch. */
+  updatedAt: number;
+  /** Reopens its worktree from a terminal in a clone of the repository. Null for the checkout, which has no worktree to open. */
+  resumeCommand: string | null;
+}
+
 /** Used and total, in bytes. */
 export interface Usage {
   used: number;
@@ -226,6 +245,8 @@ export interface VmInfo {
   sleepsAt: number | null;
   projects: string[];
   sessions: VmSession[];
+  /** From the last time the VM's OpenCode answered, which stays while the VM sleeps. */
+  openCodeSessions: VmOpenCodeSession[];
   t3Version: string | null;
   /** T3 on the VM has not started with the current sign-ins and environment variables yet. */
   updatePending: boolean;

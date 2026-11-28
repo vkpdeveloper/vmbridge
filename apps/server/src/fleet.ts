@@ -132,8 +132,10 @@ export class Fleet extends EventEmitter<FleetEvents> {
   private readonly opencodes = new Map<string, Promise<OpenCodeServer>>();
   /** When each OpenCode worktree's base branch was last fetched, by `<vmId>/<name>`. */
   private readonly baseFetchedAt = new Map<string, number>();
-  /** Previews of dev servers' ports, by the machine they were made on and the port. */
+  /** Previews of the relay to dev servers' ports (see `portPreview`), by the machine they were made on. */
   private readonly relayPreviews = new WeakMap<Box, Promise<Preview>>();
+  /** Connections `runningOpenCode` made to read OpenCode, for the machine they were made on. */
+  private readonly openCodeReaders = new WeakMap<Box, Promise<OpenCodeServer>>();
   private readonly placing = new Map<string, Promise<string>>();
   private readonly locks = new Map<string, Promise<unknown>>();
   private readonly leases = new Map<string, number>();
@@ -827,6 +829,30 @@ export class Fleet extends EventEmitter<FleetEvents> {
       });
     }
     return flight;
+  }
+
+  /**
+   * OpenCode on an awake VM where it ran before, for reading it, else null. Unlike `opencode`, it never starts, installs
+   * or waits for OpenCode, runs nothing on the VM and never takes a lease. Without a connection from an earlier use, as
+   * after VM Bridge restarts, it makes one from a preview of OpenCode's port, which fails its requests while nothing listens.
+   */
+  async runningOpenCode(vmId: string): Promise<OpenCodeServer | null> {
+    const vm = this.store.vm(vmId);
+    const box = this.machineReady(vmId) ? this.boxes.get(vmId) : undefined;
+    const password = vm?.opencodePassword;
+    if (!vm || !box || !password) return null;
+    const flight = this.opencodes.get(vmId);
+    // A start still under way loses to `null`, which is listed second. One that finished wins, being listed first.
+    const started = flight ? await Promise.race([flight, null]).catch(() => null) : null;
+    if (started && !started.expiring) return started;
+    const kept = await this.openCodeReaders.get(box)?.catch(() => null);
+    if (kept && !kept.expiring) return kept;
+    const driver = this.driver(vm.provider);
+    const reader = (driver.preview ? driver.preview(box, opencodePort) : box.preview(opencodePort)).then(
+      (preview) => new OpenCodeServer(vmId, preview, password, this.openSocket),
+    );
+    this.openCodeReaders.set(box, reader);
+    return reader.catch(() => null);
   }
 
   /** Drops what VM Bridge knows of a VM's OpenCode, such as after it stopped answering. The next request checks again. */

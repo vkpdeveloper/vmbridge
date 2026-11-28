@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { CommandLineIcon } from "@hugeicons/core-free-icons";
 import { QRCodeSVG } from "qrcode.react";
-import type { OpenCodeConnection, ProjectInfo } from "@vmbridge/contracts";
+import { toast } from "sonner";
+import type { OpenCodeConnection, ProjectInfo, VmOpenCodeSession } from "@vmbridge/contracts";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemTitle } from "@/components/ui/item";
+import { Badge } from "@/components/ui/badge";
+import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemTitle } from "@/components/ui/item";
+import { copyText } from "@/lib/clipboard";
 import { useAction } from "@/hooks/use-action";
 import { api } from "./api.ts";
+import { AgentLogo } from "./brand.tsx";
 import { CopyButton } from "./CopyButton.tsx";
 
 /**
@@ -115,5 +119,65 @@ export function ConnectOpenCode({ project }: { project: ProjectInfo }) {
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * An AI provider's logo from models.dev, which has one for each provider OpenCode lists and draws it in the text color,
+ * so it is inverted on the dark dashboard. Offline, or when models.dev has none, the provider's first letter stands in.
+ */
+function ProviderMark({ provider }: { provider: { id: string; name: string } }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return <span className="grid size-4 shrink-0 place-items-center text-[11px] font-semibold text-muted-foreground">{provider.name.slice(0, 1).toUpperCase()}</span>;
+  return (
+    <img
+      src={`https://models.dev/logos/${encodeURIComponent(provider.id)}.svg`}
+      alt=""
+      referrerPolicy="no-referrer"
+      className="size-4 shrink-0 object-contain dark:invert"
+      draggable={false}
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
+/** A VM's OpenCode session. Clicking it copies the command that opens its worktree again, when it has one. */
+export function OpenCodeSessionItem({ session }: { session: VmOpenCodeSession }) {
+  const { resumeCommand, provider } = session;
+  const row = (
+    <>
+      <ItemMedia className="self-start pt-0.5" title="OpenCode">
+        <AgentLogo agent="opencode" className="size-5" />
+      </ItemMedia>
+      <ItemContent className="min-w-0">
+        <ItemTitle className="w-full justify-between">
+          <span className="truncate">{session.title}</span>
+          <Badge variant={session.working ? "default" : "secondary"}>{session.working ? "working" : "idle"}</Badge>
+        </ItemTitle>
+        {(provider || session.model) && (
+          <ItemDescription className="flex min-w-0 items-center gap-1.5 text-xs">
+            {provider && <ProviderMark provider={provider} />}
+            <span className="truncate">{[provider?.name, session.model].filter(Boolean).join(" · ")}</span>
+          </ItemDescription>
+        )}
+        <ItemDescription className="truncate text-xs">{[session.repository, session.branch].filter(Boolean).join(" · ")}</ItemDescription>
+      </ItemContent>
+    </>
+  );
+  if (!resumeCommand) return <Item variant="outline" size="sm">{row}</Item>;
+  return (
+    <Item asChild variant="outline" size="sm">
+      <button
+        type="button"
+        className="cursor-pointer text-left hover:bg-muted"
+        title={resumeCommand}
+        onClick={async (event) => {
+          if (await copyText(resumeCommand, event.currentTarget)) toast.success("Copied.");
+          else toast.error("Copy failed.");
+        }}
+      >
+        {row}
+      </button>
+    </Item>
   );
 }

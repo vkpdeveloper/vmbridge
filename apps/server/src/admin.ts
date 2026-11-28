@@ -40,6 +40,7 @@ import type { Usage } from "./usage.ts";
 import type { Budget } from "./budget.ts";
 import { envNameProblem, envValueProblem } from "./vm/runtime.ts";
 import type { SkillsState } from "./vm/skills.ts";
+import { describeOpenCodeSessions, type OpenCodeSessions } from "./vm/opencode-sessions.ts";
 import type { Stats } from "./vm/stats.ts";
 import { addressPreference, type Watch } from "./watch/watch.ts";
 
@@ -82,6 +83,7 @@ export interface AdminDeps {
   opencode: OpenCodeGateway;
   agents: AgentAuth;
   stats: Stats;
+  openCodeSessions: OpenCodeSessions;
   skills: Skills;
   usage: Usage;
   budget: Budget;
@@ -741,6 +743,7 @@ export class Admin {
               updatedAt: typeof thread.updatedAt === "string" ? thread.updatedAt : null,
             };
           }),
+          openCodeSessions: describeOpenCodeSessions(this.deps.openCodeSessions.get(vm.id), vm.id, store),
           t3Version: vm.t3Version,
           updatePending: fleet.behind(vm),
           stats: vm.state === "ready" || vm.state === "busy" ? this.deps.stats.get(vm.id) : null,

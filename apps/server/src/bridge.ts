@@ -23,6 +23,7 @@ import type { Sql } from "./sql.ts";
 import { Store } from "./store.ts";
 import { Traffic } from "./traffic.ts";
 import { Usage } from "./usage.ts";
+import { OpenCodeSessions } from "./vm/opencode-sessions.ts";
 import { Stats } from "./vm/stats.ts";
 import { WatchLinks } from "./watch/links.ts";
 import { Watch } from "./watch/watch.ts";
@@ -62,6 +63,7 @@ export function openBridge(runtime: BridgeRuntime) {
     void fleet.shareSkills();
   });
   const stats = new Stats(fleet);
+  const openCodeSessions = new OpenCodeSessions(fleet);
   const usage = new Usage(store, () => fleet.connected());
   for (const event of ["changed", "awake", "offline"] as const) fleet.on(event, () => usage.sync());
   const branches = new RemoteBranches(() => secrets.get("github.token"), runtime.resolve);
@@ -93,7 +95,7 @@ export function openBridge(runtime: BridgeRuntime) {
     addresses: runtime.addresses,
     page: runtime.watchPage,
   });
-  return { settings, encryption, key, secrets, store, traffic, agents, skills, fleet, stats, usage, budget, hub, gateway, opencode, clients, auth, watch };
+  return { settings, encryption, key, secrets, store, traffic, agents, skills, fleet, stats, openCodeSessions, usage, budget, hub, gateway, opencode, clients, auth, watch };
 }
 
 export type Bridge = ReturnType<typeof openBridge>;

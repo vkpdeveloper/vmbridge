@@ -56,7 +56,7 @@ import { cn } from "@/lib/utils";
 import { ago, api, useTick } from "./api.ts";
 import { AgentLogo, Logo, ProjectIcon, ProviderLogo } from "./brand.tsx";
 import { CopyButton } from "./CopyButton.tsx";
-import { ConnectOpenCode } from "./OpenCode.tsx";
+import { ConnectOpenCode, OpenCodeSessionItem } from "./OpenCode.tsx";
 
 /** A connection animates while it carried a request this recently. */
 const flowWindowMs = 8_000;
@@ -855,7 +855,7 @@ function VmDetails({ vm, overview, now, onClose }: { vm: VmInfo; overview: Overv
         </section>
         <section className="flex flex-col gap-2">
           <h3 className="text-xs font-medium text-muted-foreground">Sessions</h3>
-          {vm.sessions.length === 0 && <p className="text-[13px] text-muted-foreground">No sessions.</p>}
+          {vm.sessions.length + vm.openCodeSessions.length === 0 && <p className="text-[13px] text-muted-foreground">No sessions.</p>}
           <ItemGroup className="gap-1.5">
             {vm.sessions.map((session) => {
               const project = overview.projects.find((entry) => entry.id === session.projectId);
@@ -879,6 +879,9 @@ function VmDetails({ vm, overview, now, onClose }: { vm: VmInfo; overview: Overv
                 </Item>
               );
             })}
+            {vm.openCodeSessions.map((session) => (
+              <OpenCodeSessionItem key={session.id} session={session} />
+            ))}
           </ItemGroup>
         </section>
       </div>
