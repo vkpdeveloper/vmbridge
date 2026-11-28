@@ -1,5 +1,5 @@
 import { describe, expect, setSystemTime, test } from "bun:test";
-import { boat, boatCredentials } from "../src/providers/boat.ts";
+import { boat, boatCredentials, boatProvider } from "../src/providers/boat.ts";
 import { BoatSignIn, boatClientId } from "../src/providers/boat-sign-in.ts";
 import type { Credentials } from "../src/providers/types.ts";
 import { GET as relay } from "../../landing/app/boat/callback/route.ts";
@@ -45,8 +45,10 @@ describe("Boat sign-in", () => {
     const params = authorize.searchParams;
     expect(params.get("client_id")).toBe(boatClientId);
     expect(params.get("code_challenge_method")).toBe("S256");
-    // No environments (whose secrets come with them), and no deleting VMs it did not create.
-    expect(params.get("scope")!.split(" ")).not.toContainAnyValues(["environment.read", "sandbox.delete"]);
+    // No environments (whose secrets come with them). Full delete, so VMs an API key made stay deletable.
+    const scope = params.get("scope")!.split(" ");
+    expect(scope).not.toContainAnyValues(["environment.read", "sandbox.delete-own"]);
+    expect(scope).toContain("sandbox.delete");
     // The callback page finds the install from the state alone.
     expect(atob(params.get("state")!.split(".")[0]!.replaceAll("-", "+").replaceAll("_", "/"))).toBe("https://bridge.example.ts.net");
 
@@ -285,6 +287,25 @@ describe("Boat credentials", () => {
     saved.apiKey = "boat_key_2";
     expect(await credentials.token()).toBe("boat_key_2");
     expect(credentials.secretValues()).toContain("boat_key_2");
+  });
+});
+
+describe("Boat delete", () => {
+  test("a connection Boat will not let delete a VM says to connect again", async () => {
+    const realFetch = globalThis.fetch;
+    const deletes: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      deletes.push(`${init?.method} ${new URL(String(input)).pathname}`);
+      return json({ error: { code: "api_key_action_forbidden", message: "Missing sandbox.delete" } }, 403);
+    }) as typeof fetch;
+    try {
+      const signIn = { connected: () => true, token: async () => "boat_access_1", refresh: async () => {}, secretValues: () => ["boat_access_1"] };
+      const driver = boatProvider.open({ values: {}, signIn });
+      await expect(driver.destroy("bx_made_by_key")).rejects.toThrow("Disconnect Boat in Accounts, connect it again, then delete.");
+      expect(deletes).toContain("DELETE /api/v1/sandboxes/bx_made_by_key");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });
 

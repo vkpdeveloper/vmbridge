@@ -30,9 +30,9 @@ const meUrl = "https://boat.dev/api/v1/me";
 
 /**
  * Only what VM Bridge calls: the account's email (account.read, shown in Accounts so people know which Boat account is
- * connected), list, create, wake (resume), rename and extend (update), stop and delete its own VMs, run commands and
- * move files in them, open T3's port (host), and save and check base snapshots. `sandbox.delete-own` keeps it from
- * deleting VMs it did not create.
+ * connected), list, create, wake (resume), rename and extend (update), stop and delete VMs, run commands and move files
+ * in them, open T3's port (host), and save and check base snapshots. `sandbox.delete`, not `sandbox.delete-own`: VMs an
+ * API key created before connecting must stay deletable, and VM Bridge only deletes VMs it tracks.
  *
  * Left out on purpose: `environment.read`, which with `exec` makes Boat add `environment.values.read`, the
  * environments' secrets. A person who wants VMs in one environment picks it on Boat's page when connecting.
@@ -44,7 +44,7 @@ const scopes = [
   "sandbox.resume",
   "sandbox.update",
   "sandbox.stop",
-  "sandbox.delete-own",
+  "sandbox.delete",
   "exec",
   "file.read",
   "file.write",
