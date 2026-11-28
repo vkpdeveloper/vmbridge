@@ -25,24 +25,29 @@ function duration(ms: number) {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
-/** "now", "5m ago", "2h ago" or "3d ago", for a turn that ended. */
+/** "just now", "5m ago", "2h ago" or "3d ago", for a turn that ended. */
 function ago(ms: number) {
   const minutes = Math.floor(ms / 60_000);
-  if (minutes < 1) return "now";
+  if (minutes < 1) return "just now";
   if (minutes < 60) return `${minutes}m ago`;
   if (minutes < 1440) return `${Math.floor(minutes / 60)}h ago`;
   return `${Math.floor(minutes / 1440)}d ago`;
 }
 
-/** What a session is doing, such as "Working 3m" or "Done 5m ago". */
+/** How long "Done" shows after a turn ends. Longer than the dashboard's 5s poll, so a poll can't skip it. */
+const doneShownMs = 10_000;
+
+/** What a session is doing, such as "Working 3m", "Done just now" or, once "Done" has shown for a moment, "5m ago". */
 export function SessionStatus({ activity }: { activity: SessionActivity }) {
   const { state, since } = activity;
   // A turn still going is timed, like T3's "Working 3m". One that ended says how long ago.
   const ongoing = state === "working" || state === "starting" || state === "waiting";
-  // Each second only while a turn runs, for its timer.
-  const now = useTick(ongoing && since ? 1000 : 30_000);
-  const look = looks[state];
+  const justDone = state === "done" && since !== null && Date.now() - since < doneShownMs;
+  // Each second while a turn runs, for its timer, or while "Done" shows, to drop it on time.
+  const now = useTick((ongoing && since) || justDone ? 1000 : 30_000);
   const time = since ? (ongoing ? duration(now - since) : ago(now - since)) : null;
+  if (state === "done" && since && now - since >= doneShownMs) return <span className="shrink-0 text-xs text-muted-foreground">{ago(now - since)}</span>;
+  const look = looks[state];
   return (
     <span className={cn("flex shrink-0 items-center gap-1 text-xs font-medium", look.className)}>
       <HugeiconsIcon icon={look.icon} className="size-3.5" strokeWidth={2} />
