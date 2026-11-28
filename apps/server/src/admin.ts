@@ -14,6 +14,7 @@ import {
   type VmSize,
   type BridgeUpdate,
   type OpenCodeConnection,
+  type BoatOutcome,
 } from "@vmbridge/contracts";
 import { analyticsReport } from "./analytics.ts";
 import { InvalidSignIn, type AgentAuth, type TokenInput } from "./agent-auth/profiles.ts";
@@ -30,6 +31,7 @@ import { newToken } from "./auth/tokens.ts";
 import { githubName } from "./gateway/repos.ts";
 import { agentKind, agentName } from "./gateway/agents.ts";
 import { isWorking, str } from "./gateway/types.ts";
+import { BoatSignInError, type BoatSignIn } from "./providers/boat-sign-in.ts";
 import { hasScreen, providers } from "./providers/index.ts";
 import { envVars, machineName, saveEnvVars, type Secrets, type Settings } from "./settings.ts";
 import { InstructionsError, isInstructionName } from "./instructions.ts";
@@ -74,6 +76,7 @@ export interface AdminDeps {
   secrets: Secrets;
   store: Store;
   fleet: Fleet;
+  boat: BoatSignIn;
   hub: Hub;
   traffic: Traffic;
   clients: Clients;
@@ -167,6 +170,9 @@ export class Admin {
         if (!cookie) return json({ error: "This setup link does not work. Open the link printed in the terminal where VM Bridge is running." }, 401);
         return loggedIn(cookie);
       }
+      // Before the session check: Boat's page sends the browser here from another site, which never brings the
+      // dashboard's SameSite=Strict cookie. The sign-in's state is what proves the person started it (see BoatSignIn).
+      if (path === "/providers/boat/callback" && request.method === "GET") return await this.boatCallback(request);
       if (!auth.authenticated(request)) return json({ error: "Log in first." }, 401);
       return await this.route(request, path, address);
     } catch (error) {
@@ -338,17 +344,24 @@ export class Admin {
         return json(await fleet.driver(id).options(field));
       }
       if (action === "add" && method === "POST") {
-        await fleet.driver(id).verify();
-        const added = settings.get("providers");
-        if (!added.includes(id)) {
-          settings.set("providers", [...added, id]);
-          // No VM is created there until it is built, so the first one already starts from it.
-          fleet.prepareBase(id);
-        }
-        // The first provider added becomes the default.
-        if (!settings.get("defaultProvider")) settings.set("defaultProvider", id);
-        this.providersChanged();
+        await this.addProvider(id);
         return json(this.providerInfo(id));
+      }
+      if (id === "boat" && action === "connect" && method === "POST") {
+        const back = (await body(request)).back;
+        // Checked after the URL parser has resolved it, as the redirect back will be: `/dashboard/..//x` is `//x`.
+        const resolved = typeof back === "string" ? new URL(back, "http://bridge") : null;
+        if (!resolved || resolved.origin !== "http://bridge" || !/^\/dashboard(\/|$)/.test(resolved.pathname)) {
+          throw new BadRequest("Say which dashboard page to come back to.");
+        }
+        // The address the browser uses, which sameOrigin checked against the host. Boat's page sends it back there.
+        const origin = request.headers.get("origin") ?? new URL(request.url).origin;
+        return json({ url: await this.deps.boat.start(origin, `${resolved.pathname}${resolved.search}`) });
+      }
+      if (id === "boat" && action === "disconnect" && method === "POST") {
+        const revoked = await this.deps.boat.disconnect();
+        this.signInChanged(id);
+        return json({ provider: this.providerInfo(id), revoked });
       }
       if (action === "setup" && method === "POST") {
         if (!settings.get("providers").includes(id)) throw new BadRequest(`Add ${definition.label} first.`);
@@ -370,6 +383,11 @@ export class Admin {
           this.deps.traffic.record({ kind: "provider", operation: "remove provider", provider: id, status: "error", reason: message(error) }),
         );
         if (settings.get("defaultProvider") === id) settings.set("defaultProvider", remaining[0] ?? null);
+        // A removed provider's sign-in is not kept alive on Boat by the daily refresh.
+        if (id === "boat" && this.deps.boat.status().connected) {
+          await this.deps.boat.disconnect();
+          this.signInChanged(id);
+        }
         this.providersChanged();
         return json(this.providerInfo(id));
       }
@@ -659,6 +677,8 @@ export class Admin {
       .filter((field) => field.kind === "secret" && secrets.has(`provider.${id}.${field.key}`))
       .map((field) => field.key);
     const all = providerValues(settings, secrets, id);
+    // Boat is the only provider with a sign-in.
+    const signIn = definition.signIn ? this.deps.boat.status() : null;
     return {
       id,
       label: definition.label,
@@ -669,12 +689,67 @@ export class Admin {
       defaultSize: definition.defaultSize,
       values,
       secretsSet,
-      configured: definition.fields.every((field) => !field.required || Boolean(all[field.key])),
+      configured: Boolean(signIn?.connected) || definition.fields.every((field) => !field.required || Boolean(all[field.key])),
       added: settings.get("providers").includes(id),
       isDefault: settings.get("defaultProvider") === id,
       setup: this.deps.fleet.setup(id),
       problem: problems.providers.get(id) ?? null,
+      signIn,
     };
+  }
+
+  /** Checks the provider's credentials, then adds it. The first provider added becomes the default. */
+  private async addProvider(id: ProviderId) {
+    const { fleet, settings } = this.deps;
+    await fleet.driver(id).verify();
+    const added = settings.get("providers");
+    if (!added.includes(id)) {
+      settings.set("providers", [...added, id]);
+      // No VM is created there until it is built, so the first one already starts from it.
+      fleet.prepareBase(id);
+    }
+    if (!settings.get("defaultProvider")) settings.set("defaultProvider", id);
+    this.providersChanged();
+  }
+
+  /** A new connection, like a new key, tries a failed setup again and rechecks the provider. */
+  private signInChanged(id: ProviderId) {
+    const { fleet, settings } = this.deps;
+    if (settings.get("providers").includes(id)) {
+      fleet.prepareBase(id, true);
+      void fleet.reconcile(id);
+    }
+    this.providersChanged();
+  }
+
+  /**
+   * Where Boat's page sends the browser after the person chose (through VM Bridge's website, see BoatSignIn). Goes
+   * back to the dashboard page the connect started on, adding Boat when it is not added yet, with `boat=` and how it
+   * ended. Details go to the traffic log, not the address.
+   */
+  private async boatCallback(request: Request): Promise<Response> {
+    const go = (back: string, outcome: BoatOutcome) => {
+      const url = new URL(back, "http://bridge");
+      url.searchParams.set("boat", outcome);
+      return new Response(null, { status: 303, headers: { location: `${url.pathname}${url.search}`, "referrer-policy": "no-referrer", "cache-control": "no-store" } });
+    };
+    let back: string;
+    try {
+      back = await this.deps.boat.finish(new URL(request.url).searchParams);
+    } catch (error) {
+      this.deps.traffic.record({ kind: "provider", operation: "connect Boat", provider: "boat", status: "error", reason: message(error) });
+      return go("/dashboard?view=accounts&tab=provider", error instanceof BoatSignInError ? error.outcome : "failed");
+    }
+    this.signInChanged("boat");
+    if (!this.deps.settings.get("providers").includes("boat")) {
+      try {
+        await this.addProvider("boat");
+      } catch (error) {
+        this.deps.traffic.record({ kind: "provider", operation: "add provider", provider: "boat", status: "error", reason: message(error) });
+        return go(back, "not-added");
+      }
+    }
+    return go(back, "connected");
   }
 
   private providersChanged() {

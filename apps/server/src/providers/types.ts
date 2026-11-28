@@ -79,6 +79,8 @@ export interface ProviderDefinition {
   defaultSize: VmSize;
   /** Its VMs have a desktop VM Bridge can stream to a watch link (see watch/). */
   screen?: boolean;
+  /** It can be connected by signing in, instead of its key field (Boat, see boat-sign-in.ts). */
+  signIn?: boolean;
   /** Why a new value for a secret field cannot be saved, or null when it can. Absent: any value can. */
   check?(field: string, value: string): Promise<string | null>;
   open(config: ProviderConfig): Driver;
@@ -87,6 +89,25 @@ export interface ProviderDefinition {
 export interface ProviderConfig {
   /** Field values by key: secrets and plain options together. */
   values: Record<string, string>;
+  /** The provider's sign-in, connected or not. While connected, the provider uses it instead of its key field. */
+  signIn?: SignIn;
+  /** The saved values now, for VMs still open on this driver after they changed (Boat reads its key per request). */
+  latest?: () => Record<string, string>;
+}
+
+/** A sign-in that can be connected and disconnected while drivers and their VMs stay open. */
+export interface SignIn extends Credentials {
+  connected(): boolean;
+}
+
+/** Bearer credentials that may change while a driver is open, such as OAuth tokens. */
+export interface Credentials {
+  /** The token for the next request. */
+  token(): Promise<string>;
+  /** Gets a new token after the provider refused the current one. */
+  refresh(): Promise<void>;
+  /** Values errors must never show. */
+  secretValues(): string[];
 }
 
 export function required(config: ProviderConfig, key: string, label: string): string {

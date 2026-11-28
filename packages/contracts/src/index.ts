@@ -21,6 +21,8 @@ export interface ProviderField {
   placeholder?: string;
   /** A `select` field's fixed choices, shown without loading them from the provider. The first is the default. */
   options?: SelectOption[];
+  /** Used only without a sign-in: hidden and ignored while the provider's account is connected. */
+  keyOnly?: boolean;
 }
 
 /** How a provider keeps a VM between bursts of work. */
@@ -54,6 +56,29 @@ export interface ProviderInfo {
   setup: ProviderSetup;
   /** The latest background failure on this provider not since put right, such as a VM or snapshot it could not delete. */
   problem: string | null;
+  /** Present for providers VM Bridge can connect to by signing in (Boat), instead of pasting a key. */
+  signIn: ProviderSignIn | null;
+}
+
+/**
+ * How a Boat connect ended, sent back to the dashboard as `?boat=`. Only these words, never free text, so a link
+ * someone else made cannot show its own message in the dashboard.
+ */
+export const boatOutcomes = {
+  connected: "Boat connected.",
+  invalid: "This Boat sign-in link is not for this VM Bridge. Connect again.",
+  expired: "The Boat sign-in took too long. Connect again.",
+  denied: "Boat access was not allowed.",
+  refused: "Boat did not accept the sign-in. Connect again.",
+  "not-added": "Boat is connected, but could not be added. Add it below.",
+  failed: "The Boat sign-in failed. Connect again.",
+} as const;
+export type BoatOutcome = keyof typeof boatOutcomes;
+
+export interface ProviderSignIn {
+  connected: boolean;
+  /** The connected account's email or login, when the provider said. */
+  account: string | null;
 }
 
 /**

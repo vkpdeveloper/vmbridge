@@ -11,6 +11,7 @@ import { Clones } from "./gateway/clones.ts";
 import { FileTrees } from "./gateway/files.ts";
 import { T3Gateway } from "./gateway/http.ts";
 import { OpenCodeGateway } from "./gateway/opencode.ts";
+import { BoatSignIn } from "./providers/boat-sign-in.ts";
 import { Hub } from "./gateway/hub.ts";
 import { RemoteBranches } from "./gateway/repos.ts";
 import { Rpc } from "./gateway/rpc.ts";
@@ -55,6 +56,8 @@ export function openBridge(runtime: BridgeRuntime) {
   const agents = new AgentAuth(db, settings, encryption);
 
   const fleet = new Fleet(store, settings, secrets, traffic, agents, skills, runtime.openSocket);
+  const boat = new BoatSignIn(secrets);
+  fleet.signIns = { boat };
   skills.on("changed", () => {
     fleet.emit("changed");
     void fleet.shareSkills();
@@ -90,7 +93,7 @@ export function openBridge(runtime: BridgeRuntime) {
     addresses: runtime.addresses,
     page: runtime.watchPage,
   });
-  return { settings, encryption, key, secrets, store, traffic, agents, skills, fleet, stats, usage, budget, hub, gateway, opencode, clients, auth, watch };
+  return { settings, encryption, key, secrets, store, traffic, agents, skills, fleet, boat, stats, usage, budget, hub, gateway, opencode, clients, auth, watch };
 }
 
 export type Bridge = ReturnType<typeof openBridge>;
