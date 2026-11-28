@@ -763,7 +763,18 @@ export const boatProvider: ProviderDefinition = {
         await client.request({ method: "PATCH", path: "/sandboxes/{sandboxId}", params: { sandboxId: box.id }, sandboxId: box.id, body: { ttlSeconds } });
       },
 
-      destroy: (sandboxId) => provider.destroy(sandboxId),
+      async destroy(sandboxId) {
+        try {
+          await provider.destroy(sandboxId);
+        } catch (error) {
+          // Connections made before VM Bridge asked for `sandbox.delete` hold only `sandbox.delete-own`, which cannot
+          // delete VMs an API key created. Connecting again grants the new scope.
+          if (signedIn() && error instanceof SandboxError && error.code === "auth") {
+            throw new Error("Boat did not let this connection delete a VM it did not create. Disconnect Boat in Accounts, connect it again, then delete.");
+          }
+          throw error;
+        }
+      },
     };
   },
 };
