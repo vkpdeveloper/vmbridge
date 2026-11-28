@@ -320,7 +320,7 @@ export function credentialsFingerprint(credentials: VmCredentials, encryption: E
 }
 
 /** Installs the OpenCode CLI unless the VM has it. Its output goes to stderr, as stdout is for reports. */
-export const installOpenCode = `command -v opencode >/dev/null || npm install -g --prefix ${root}/npm --no-audit --no-fund --loglevel=error opencode-ai >&2`;
+const installOpenCode = `command -v opencode >/dev/null || npm install -g --prefix ${root}/npm --no-audit --no-fund --loglevel=error opencode-ai >&2`;
 
 /** Writes a file atomically, creating its folder, from base64 on stdin. */
 export const put = `put() { mkdir -p "\${1%/*}" && base64 -d > "$1.vmbridge-new" && mv -f "$1.vmbridge-new" "$1"; }`;

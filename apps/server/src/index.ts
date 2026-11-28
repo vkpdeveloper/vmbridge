@@ -177,7 +177,11 @@ export async function start(options: StartOptions = {}) {
         }
         const relay = (upgrade: Request, viewer: Viewer) => (server.upgrade(upgrade, { data: { viewer } }) ? undefined : null);
         // Before T3's paths: `opencode api` asks for /api/ paths at the root.
-        if (opencodeRequest) return opencode.fetch(request, relay);
+        if (opencodeRequest) {
+          // A request can wait for its VM to wake for longer than the 60 seconds above (see OpenCodeGateway).
+          server.timeout(request, 100);
+          return opencode.fetch(request, relay);
+        }
         if (isT3Path(path)) return gateway.fetch(request, (upgrade, data) => (server.upgrade(upgrade, { data }) ? undefined : null), relay);
         // Before the dashboard's files, which would otherwise answer for any path.
         if (isWatchPath(path)) return watch.fetch(request, relay);

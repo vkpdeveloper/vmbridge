@@ -3,7 +3,7 @@ import { BudgetReached } from "../budget.ts";
 import { message, NoProvider, type Fleet } from "../fleet.ts";
 import { primaryVm, type Store } from "../store.ts";
 import type { Traffic } from "../traffic.ts";
-import { NoOpenCodeKey, OpenCodeUnreachable, type OpenCodeServer } from "../vm/opencode.ts";
+import { cliVersion, NoOpenCodeKey, OpenCodeUnreachable, type OpenCodeServer } from "../vm/opencode.ts";
 import type { Viewer, WatchUpgrade } from "../watch/watch.ts";
 import { previewRelay } from "./preview.ts";
 
@@ -15,6 +15,17 @@ import { previewRelay } from "./preview.ts";
 export const openCodePrefix = "/opencode/";
 
 const retryAfterSeconds = 10;
+/**
+ * OpenCode's clients check a server with `GET /api/info` and give up after about 5 seconds, which a sleeping VM never
+ * makes. Past this, VM Bridge answers for it while the VM wakes. The client's next requests wait for the VM, and it asks
+ * again once the VM is up.
+ */
+const infoWaitMs = 3_000;
+const wakingInfo = () =>
+  Response.json(
+    { version: cliVersion, pid: 0, hostname: "VM Bridge", urls: [], paths: { tmp: "/tmp/opencode" }, capabilities: { persistentPty: true } },
+    { headers: { "cache-control": "no-store" } },
+  );
 /** Typing in a terminal counts as activity, but the VM's row is written at most this often for it. */
 const touchEveryMs = 10_000;
 
@@ -27,7 +38,10 @@ const ticketed = [
 
 /** As `opencode pair`'s codes: one use, for ten minutes. */
 const pairingMs = 10 * 60_000;
-/** Where OpenCode's clients trade a pairing code for a password. VM Bridge answers it, under the project's address. */
+/**
+ * Where OpenCode's clients trade a pairing code for a password. VM Bridge answers it, at the root too: OpenCode's phone
+ * app takes only an address without a path, and the code says which project it is for.
+ */
 const connectPath = /^\/auth\/connect\/([^/]+)$/;
 
 /** Pairing on the VM would hand out a credential for its own server, which only VM Bridge holds. */
@@ -71,10 +85,13 @@ export function givenPassword(request: Request, url: URL): string | null {
 
 const atRoot = (path: string) => path === "/openapi.json" || path.startsWith("/api/");
 
-/** Requests for OpenCode: under a project's address, or at the root with a password, which T3's clients never send. */
+/**
+ * Requests for OpenCode: under a project's address, a pairing code at the root, or at the root with a password, which
+ * T3's clients never send.
+ */
 export function isOpenCodeRequest(request: Request) {
   const url = new URL(request.url);
-  if (url.pathname.startsWith(openCodePrefix)) return true;
+  if (url.pathname.startsWith(openCodePrefix) || connectPath.test(url.pathname)) return true;
   return atRoot(url.pathname) && givenPassword(request, url) !== null;
 }
 
@@ -147,8 +164,11 @@ export class OpenCodeGateway {
     private readonly traffic: Traffic,
     /** Whether VM Bridge has an OpenCode key to give VMs. OpenCode is not started without one. */
     private readonly hasKey: () => boolean,
-    /** How long a request waits for its VM to wake and OpenCode to start before it is told to try again. */
-    private readonly wakeWaitMs = 25_000,
+    /**
+     * How long a request waits for its VM to wake and OpenCode to start before it is told to try again. OpenCode's
+     * clients wait as long as it takes, so this is just under the 100 seconds Cloudflare's tunnel waits for an answer.
+     */
+    private readonly wakeWaitMs = 90_000,
   ) {
     fleet.on("offline", (vmId) => this.end(vmId, "The VM went to sleep"));
   }
@@ -185,10 +205,14 @@ export class OpenCodeGateway {
     return { code, expiresInSeconds: pairingMs / 1000 };
   }
 
-  /** Answers as OpenCode's own server does for a client that wants JSON. The client asks from any origin, as a web app. */
-  private redeem(request: Request, projectId: string, code: string, seen: Seen) {
+  /**
+   * Answers as OpenCode's own server does for a client that wants JSON. The client asks from any origin, as a web app.
+   * At a project's address the code must be that project's; at the root (`projectId` null) it names the project.
+   */
+  private redeem(request: Request, projectId: string | null, code: string, seen: Seen) {
     const pairing = this.pairings.get(code);
-    const password = pairing && pairing.projectId === projectId && pairing.expires > Date.now() ? this.store.openCodePassword(projectId) : null;
+    const valid = pairing && (projectId === null || pairing.projectId === projectId) && pairing.expires > Date.now();
+    const password = valid ? this.store.openCodePassword(pairing.projectId) : null;
     const headers = { "access-control-allow-origin": request.headers.get("origin") ?? "*", "cache-control": "no-store", vary: "Origin" };
     if (!password) {
       seen.refusal = "expired pairing code";
@@ -242,7 +266,7 @@ export class OpenCodeGateway {
       projectId = slash < 0 ? rest : rest.slice(0, slash);
       path = slash < 0 ? "/" : rest.slice(slash);
       if (!projectId) return null;
-    } else if (!atRoot(path)) return null;
+    } else if (!atRoot(path) && !connectPath.test(path)) return null;
     const query = new URLSearchParams(url.search);
     query.delete("auth_token");
     const search = query.toString();
@@ -267,7 +291,7 @@ export class OpenCodeGateway {
     // `..` in any spelling, `%2e%2e` too, or a second `//`, would leave the path VM Bridge checked.
     if (new URL(pathname, "http://vm").pathname !== pathname) return notFound();
     const code = request.method === "GET" ? connectPath.exec(pathname)?.[1] : undefined;
-    if (code && target.projectId !== null) return this.redeem(request, target.projectId, code, seen);
+    if (code) return this.redeem(request, target.projectId, code, seen);
     if (blocked(pathname)) return notFound();
 
     const upgrade = request.headers.get("upgrade")?.toLowerCase() === "websocket";
@@ -294,8 +318,9 @@ export class OpenCodeGateway {
     if (waking) ready = this.wake(project.id);
     else if (primary && this.fleet.backend(primary)) ready = this.fleet.opencode(primary).then((server) => ({ vmId: primary, server }));
     else return tryAgain("This project's VM is asleep. Send a request to wake it.");
-    const found = await within(ready, this.wakeWaitMs);
-    if (!found) return tryAgain("This project's VM is waking. Try again in a moment.");
+    const info = waking && request.method === "GET" && pathname === "/api/info";
+    const found = await within(ready, info ? Math.min(infoWaitMs, this.wakeWaitMs) : this.wakeWaitMs);
+    if (!found) return info ? wakingInfo() : tryAgain("This project's VM is waking. Try again in a moment.");
     // A new password while this waited ended only the connections open then, so this one is checked again.
     if (signedIn && !this.accepts(project.id, password)) {
       seen.refusal = "wrong password";

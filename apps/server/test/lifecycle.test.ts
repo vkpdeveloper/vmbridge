@@ -894,6 +894,18 @@ describe("sign-in changes", () => {
     expect(server.restarts).toBe(1);
   });
 
+  test("an OpenCode older than its clients runs no agents they started, so it counts as idle", async () => {
+    const { fleet, hub, store, server, signIns, opencode } = idleFleet();
+    const vm = await fleet.create();
+    await fleet.ensure(vm.id);
+    store.updateVm(vm.id, { opencodePassword: "vm-password" });
+    opencode.answer = "old";
+    signIns.opencodeApiKey = "oc-new";
+    await hub.credentialsChanged();
+    await hub.sweep();
+    expect(server.restarts).toBe(1);
+  });
+
   test("a stop that fails while OpenCode still answers holds back the restart, which the next sweep tries again", async () => {
     const { fleet, hub, store, server, signIns, opencode } = idleFleet();
     const vm = await fleet.create();

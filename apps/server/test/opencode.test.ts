@@ -144,6 +144,18 @@ describe("OpenCode gateway", () => {
     expect(asked).toEqual([]);
   });
 
+  test("at the root, as OpenCode's phone app asks, the code names the project and its password then routes requests", async () => {
+    const { gateway } = setup();
+    expect(isOpenCodeRequest(new Request("http://bridge.test/auth/connect/abc"))).toBe(true);
+    const { code } = gateway.pairingCode("p1");
+    const { token } = (await (await send(gateway, `/auth/connect/${code}`)).json()) as { token: string };
+    expect(token).toBe(projectPassword);
+    expect((await send(gateway, `/auth/connect/${code}`)).status).toBe(401);
+    const response = await send(gateway, "/api/info", { headers: { authorization: basic(token) } });
+    expect(response.status).toBe(200);
+    expect(asked[0]!.path).toBe(`/api/info?preview_token=${previewToken}`);
+  });
+
   test("a new password ends the pairing codes made before it", async () => {
     const { gateway } = setup();
     const { code } = gateway.pairingCode("p1");
@@ -174,6 +186,17 @@ describe("OpenCode gateway", () => {
     expect(response.status).toBe(503);
     expect(response.headers.get("retry-after")).toBe("10");
     expect(asked).toEqual([]);
+  });
+
+  test("answers OpenCode's health check itself while the VM wakes, so the client does not give up", async () => {
+    const { gateway, calls } = setup({ awake: false, wakeMs: 300, wakeWaitMs: 50 });
+    const auth = { headers: { authorization: basic(projectPassword) } };
+    const response = await send(gateway, "/opencode/p1/api/info", auth);
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { version: string }).version).toStartWith("2.");
+    expect(asked).toEqual([]);
+    // The wake goes on.
+    expect(calls.ensure).toBe(1);
   });
 
   test("an event stream does not wake a sleeping VM", async () => {
