@@ -98,6 +98,8 @@ export class Watch {
   private base: string | null = null;
   /** What each awake VM has in `watchUrlPath`: the link, or null when the file is removed. */
   private readonly delivered = new Map<string, string | null>();
+  /** Monotonic per-VM lifecycle epoch, bumped on offline/awake to fence stale in-flight deliveries. */
+  private readonly epochs = new Map<string, number>();
   private readonly delivering = new Map<string, Promise<void>>();
   /** Ends each open stream, by VM. */
   private readonly viewers = new Map<string, Set<() => void>>();
@@ -107,10 +109,15 @@ export class Watch {
     deps.fleet.on("awake", (vmId) => {
       this.ensure();
       // A woken VM may have restarted from an older disk: write its file again.
-      this.delivered.delete(vmId);
+      this.invalidate(vmId);
       void this.deliver(vmId);
     });
-    deps.fleet.on("offline", (vmId) => this.delivered.delete(vmId));
+    deps.fleet.on("offline", (vmId) => this.invalidate(vmId));
+  }
+
+  private invalidate(vmId: string) {
+    this.delivered.delete(vmId);
+    this.epochs.set(vmId, (this.epochs.get(vmId) ?? 0) + 1);
   }
 
   /** The link a VM's file and the dashboard show, or null while it is off. */
@@ -172,6 +179,8 @@ export class Watch {
       if (!this.base && this.deps.links.token(vmId)) return;
       const url = this.url(vmId);
       if (this.delivered.has(vmId) && this.delivered.get(vmId) === url) return;
+      const epoch = this.epochs.get(vmId) ?? 0;
+      this.delivered.delete(vmId);
       try {
         if (url) await box.files.write({ [watchUrlPath]: `${url}\n` }, { mode: 0o600 });
         else {
@@ -179,17 +188,20 @@ export class Watch {
             if (!(error instanceof SandboxError && error.code === "file_not_found")) throw error;
           });
         }
-        this.delivered.set(vmId, url);
+        if ((this.epochs.get(vmId) ?? 0) === epoch && this.deps.fleet.box(vmId) === box && this.url(vmId) === url) {
+          this.delivered.set(vmId, url);
+        }
       } catch {
         // No reason: the error could quote the file.
         this.deps.traffic.record({ kind: "system", operation: "give the VM its watch link", vmId, status: "error" });
       }
     };
-    const next = (this.delivering.get(vmId) ?? Promise.resolve()).then(run);
+    const next = (this.delivering.get(vmId) ?? Promise.resolve()).then(run, run);
     this.delivering.set(vmId, next);
-    void next.finally(() => {
+    const cleanup = () => {
       if (this.delivering.get(vmId) === next) this.delivering.delete(vmId);
-    });
+    };
+    void next.then(cleanup, cleanup);
     return next;
   }
 
