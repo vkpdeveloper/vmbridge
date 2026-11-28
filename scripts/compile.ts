@@ -9,7 +9,11 @@ const result = await Bun.build({
   compile: { ...(target ? { target } : {}), outfile, autoloadBunfig: false, autoloadDotenv: false },
   plugins: [tailwind],
   minify: true,
-  define: { "process.env.NODE_ENV": JSON.stringify("production") },
+  define: {
+    "process.env.NODE_ENV": JSON.stringify("production"),
+    // Release builds get the Boat OAuth client ID from a repository secret.
+    "process.env.VMBRIDGE_BOAT_CLIENT_ID": JSON.stringify(process.env.VMBRIDGE_BOAT_CLIENT_ID ?? ""),
+  },
 });
 if (!result.success) {
   for (const log of result.logs) console.error(log);
