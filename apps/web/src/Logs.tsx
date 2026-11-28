@@ -12,35 +12,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { cn } from "@/lib/utils";
 import { clock, duration, useTick } from "./api.ts";
 import { Logo, ProviderLogo } from "./brand.tsx";
-
-/** Identical requests in a row (T3 polls a lot) fold into one line with a count. */
-interface Row {
-  first: TrafficEvent;
-  last: TrafficEvent;
-  count: number;
-  totalMs: number;
-  maxMs: number;
-}
-
-const sameRequest = (a: TrafficEvent, b: TrafficEvent) =>
-  a.kind === b.kind && a.operation === b.operation && a.clientId === b.clientId && a.vmId === b.vmId && a.provider === b.provider && (a.status ?? "ok") === (b.status ?? "ok");
-
-function fold(events: TrafficEvent[]): Row[] {
-  const rows: Row[] = [];
-  for (const event of events) {
-    const ms = event.durationMs ?? 0;
-    const previous = rows.at(-1);
-    if (previous && sameRequest(previous.last, event)) {
-      previous.last = event;
-      previous.count += 1;
-      previous.totalMs += ms;
-      previous.maxMs = Math.max(previous.maxMs, ms);
-    } else {
-      rows.push({ first: event, last: event, count: 1, totalMs: ms, maxMs: ms });
-    }
-  }
-  return rows;
-}
+import { foldTraffic } from "./lib/logs.ts";
 
 const kindBar: Record<TrafficEvent["kind"], string> = {
   rpc: "bg-primary",
@@ -132,7 +104,7 @@ export function Logs({ overview, traffic }: { overview: Overview; traffic: Traff
       const haystack = [event.operation, event.reason, event.provider, event.kind, clients.get(event.clientId ?? ""), vms.get(event.vmId ?? "")?.name].join(" ").toLowerCase();
       return haystack.includes(needle);
     });
-    return fold(shown);
+    return foldTraffic(shown);
   }, [events, query, errorsOnly, clients, vms]);
 
   // Follow new lines while the view is at the bottom, like a terminal.
