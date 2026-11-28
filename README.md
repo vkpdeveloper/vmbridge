@@ -289,7 +289,8 @@ Run `vb opencode` inside a repository. VM Bridge finds or adds its project, pick
 does for a new thread (waking one, or making one when the others are full), clones the repository
 there if needed, makes a worktree on a new `opencode/<id>` branch and opens OpenCode in it. Each step
 shows as it happens. The worktree starts from your current branch when origin has it, otherwise from
-the default branch. Once it opens, OpenCode shows a toast naming the VM it runs on.
+the default branch. Once it opens, OpenCode shows a toast naming the VM it runs on, and its sidebar
+shows the repository, the branch the worktree is on now and the VM.
 
 It needs an OpenCode API key in **Accounts** and OpenCode 2 on your computer
 (`npm install -g @opencode/cli`). On the computer VM Bridge runs on, the command signs itself in; on

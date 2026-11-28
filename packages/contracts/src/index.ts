@@ -710,6 +710,8 @@ export type OpenCodeLaunchEvent =
         project: string;
         vmId: string;
         vm: string;
+        /** The VM's provider, as people know it, such as "Boat". */
+        provider: string;
         /** The worktree's name, which `DELETE /api/vmbridge/opencode` takes with the two ids to remove it. */
         name: string;
         /** The worktree on the VM. */

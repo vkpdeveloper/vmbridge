@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { OpenCodeLaunchEvent, OpenCodeWorktrees } from "@vmbridge/contracts";
 import { databasePath, dataDir, defaultPort, pairThisMachine, tokenExchange } from "@vmbridge/server";
 import { launchView, type LaunchView } from "./launch-view.ts";
+import { sidebarConfig } from "./opencode-sidebar.ts";
 import { pickWorktree, worktreeList } from "./worktree-picker.ts";
 
 interface SignIn {
@@ -184,7 +185,11 @@ async function open(root: string, body: { remote: string; branch: string | null;
   if (ready.sessionId) args.push("--session", ready.sessionId);
   const child = Bun.spawn(args, {
     cwd: root,
-    env: { ...process.env, OPENCODE_PASSWORD: ready.password },
+    env: {
+      ...process.env,
+      OPENCODE_PASSWORD: ready.password,
+      OPENCODE_CLI_CONFIG_CONTENT: sidebarConfig({ repository: ready.project, vm: ready.provider ? `${ready.vm} (${ready.provider})` : ready.vm }),
+    },
     stdio: ["inherit", "inherit", "inherit"],
   });
   // Ctrl+C belongs to OpenCode. This process stays to tidy up after it.

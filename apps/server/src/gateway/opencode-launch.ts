@@ -3,6 +3,7 @@ import type { OpenCodeLaunchEvent, OpenCodeWorktrees } from "@vmbridge/contracts
 import { newToken } from "../auth/tokens.ts";
 import { message, WorktreeGone } from "../fleet.ts";
 import { fetchPullRequest } from "../github.ts";
+import { providers } from "../providers/index.ts";
 import type { Store } from "../store.ts";
 import type { Traffic } from "../traffic.ts";
 import { NoOpenCodeKey } from "../vm/opencode.ts";
@@ -107,6 +108,7 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
         if (!opening) startOpenCode(vmId);
         await opening;
         traffic.record({ kind: "system", operation: `OpenCode worktree for ${project.title}`, vmId, status: "ok", durationMs: Math.round(performance.now() - started) });
+        const vm = store.vm(vmId);
         send({
           ready: {
             path: `${openCodePrefix}${project.id}/w/${vmId}/${worktree.name}`,
@@ -114,7 +116,8 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
             projectId: project.id,
             project: project.title,
             vmId,
-            vm: store.vm(vmId)?.name ?? vmId,
+            vm: vm?.name ?? vmId,
+            provider: vm ? providers[vm.provider].label : "",
             name: worktree.name,
             directory: worktree.path,
             branch: worktree.branch,
