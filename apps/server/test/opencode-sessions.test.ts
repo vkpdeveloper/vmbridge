@@ -70,22 +70,27 @@ describe("OpenCode sessions of a VM", () => {
   test("maps folders to repository and branch, working or idle, newest first, and the command that reopens each", async () => {
     asked = [];
     const { store, sessions } = setup();
+    setSystemTime(new Date(1000));
     await sessions.refresh("vm1");
     const shown = describeOpenCodeSessions(sessions.get("vm1"), "vm1", store);
     const anthropic = { id: "anthropic", name: "Anthropic" };
     expect(shown).toEqual([
       // The generated opencode/<name> branch says nothing, so it is left out.
-      { id: "ses_work", title: "Fix login", projectId: "p1", repository: "acme", branch: null, provider: anthropic, model: "Claude Opus 5.5", working: true, updatedAt: 300, resumeCommand: "vb opencode resume abcd1234" },
+      { id: "ses_work", title: "Fix login", projectId: "p1", repository: "acme", branch: null, provider: anthropic, model: "Claude Opus 5.5", activity: { state: "working", since: 1000 }, updatedAt: 300, resumeCommand: "vb opencode resume abcd1234" },
       // A provider the catalog names, with a model it lacks: the id is cleaned up.
-      { id: "ses_idle", title: "Docs", projectId: "p1", repository: "acme", branch: "fix/docs", provider: { id: "newco", name: "NewCo AI" }, model: "Mystery 9", working: false, updatedAt: 200, resumeCommand: "vb opencode resume wxyz5678" },
-      { id: "ses_root", title: "Untitled", projectId: "p1", repository: "acme", branch: null, provider: null, model: null, working: false, updatedAt: 100, resumeCommand: null },
+      { id: "ses_idle", title: "Docs", projectId: "p1", repository: "acme", branch: "fix/docs", provider: { id: "newco", name: "NewCo AI" }, model: "Mystery 9", activity: { state: "done", since: 200 }, updatedAt: 200, resumeCommand: "vb opencode resume wxyz5678" },
+      { id: "ses_root", title: "Untitled", projectId: "p1", repository: "acme", branch: null, provider: null, model: null, activity: { state: "idle", since: null }, updatedAt: 100, resumeCommand: null },
     ]);
     expect(asked.sort()).toEqual(["/api/integration", "/api/model", "/api/session/active", "/api/session?archived=false&limit=50"]);
 
     // Names are kept: the next look asks for the sessions only, though one id is still not in the catalog.
     asked = [];
+    setSystemTime(new Date(20_000));
     await sessions.refresh("vm1");
     expect(asked.sort()).toEqual(["/api/session/active", "/api/session?archived=false&limit=50"]);
+    // A turn still running keeps counting from when it was first seen.
+    expect(sessions.get("vm1").find((session) => session.id === "ses_work")?.workingSince).toBe(1000);
+    setSystemTime();
   });
 
   test("reads the catalog again a minute later when OpenCode had not loaded it yet", async () => {

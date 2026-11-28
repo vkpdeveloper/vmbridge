@@ -29,7 +29,6 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -57,6 +56,7 @@ import { ago, api, useTick } from "./api.ts";
 import { AgentLogo, Logo, ProjectIcon, ProviderLogo } from "./brand.tsx";
 import { CopyButton } from "./CopyButton.tsx";
 import { ConnectOpenCode, OpenCodeSessionItem } from "./OpenCode.tsx";
+import { SessionStatus } from "./SessionStatus.tsx";
 
 /** A connection animates while it carried a request this recently. */
 const flowWindowMs = 8_000;
@@ -869,7 +869,7 @@ function VmDetails({ vm, overview, now, onClose }: { vm: VmInfo; overview: Overv
                   <ItemContent>
                     <ItemTitle className="w-full justify-between">
                       <span className="truncate">{session.title}</span>
-                      <Badge variant={session.working ? "default" : "secondary"}>{session.status}</Badge>
+                      <SessionStatus activity={session.activity} />
                     </ItemTitle>
                     <ItemDescription className="flex min-w-0 items-center gap-1.5 text-xs">
                       {session.agent && <AgentAvatar agent={session.agent} className="size-4" />}

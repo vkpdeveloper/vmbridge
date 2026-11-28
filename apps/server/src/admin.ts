@@ -29,7 +29,7 @@ import { openCodePrefix, type OpenCodeGateway } from "./gateway/opencode.ts";
 import { newToken } from "./auth/tokens.ts";
 import { githubName } from "./gateway/repos.ts";
 import { agentKind, agentName } from "./gateway/agents.ts";
-import { isWorking, str } from "./gateway/types.ts";
+import { str, threadActivity } from "./gateway/types.ts";
 import { hasScreen, providers } from "./providers/index.ts";
 import { envVars, machineName, saveEnvVars, type Secrets, type Settings } from "./settings.ts";
 import { InstructionsError, isInstructionName } from "./instructions.ts";
@@ -738,8 +738,7 @@ export class Admin {
               projectId: typeof thread.projectId === "string" ? thread.projectId : null,
               model: str(listed?.name) ?? slug,
               agent: driver ? { kind: agentKind(driver), name: report?.displayName ?? agentName(driver) } : null,
-              status: String(thread.status ?? "idle"),
-              working: isWorking(thread),
+              activity: threadActivity(thread),
               updatedAt: typeof thread.updatedAt === "string" ? thread.updatedAt : null,
             };
           }),

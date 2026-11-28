@@ -5,13 +5,13 @@ import { toast } from "sonner";
 import type { OpenCodeConnection, ProjectInfo, VmOpenCodeSession } from "@vmbridge/contracts";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Badge } from "@/components/ui/badge";
 import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemTitle } from "@/components/ui/item";
 import { copyText } from "@/lib/clipboard";
 import { useAction } from "@/hooks/use-action";
 import { api } from "./api.ts";
 import { AgentLogo } from "./brand.tsx";
 import { CopyButton } from "./CopyButton.tsx";
+import { SessionStatus } from "./SessionStatus.tsx";
 
 /**
  * The terminal command that connects to an address, for PowerShell on Windows. OpenCode refuses a password in the URL
@@ -152,7 +152,7 @@ export function OpenCodeSessionItem({ session }: { session: VmOpenCodeSession })
       <ItemContent className="min-w-0">
         <ItemTitle className="w-full justify-between">
           <span className="truncate">{session.title}</span>
-          <Badge variant={session.working ? "default" : "secondary"}>{session.working ? "working" : "idle"}</Badge>
+          <SessionStatus activity={session.activity} />
         </ItemTitle>
         {(provider || session.model) && (
           <ItemDescription className="flex min-w-0 items-center gap-1.5 text-xs">

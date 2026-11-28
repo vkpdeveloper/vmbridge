@@ -180,10 +180,20 @@ export interface VmSession {
   /** The model's name as its agent lists it, such as "Claude Opus 5.5", or its ID when the agent does not list it. */
   model: string | null;
   agent: SessionAgent | null;
-  status: string;
-  /** A turn is running, queued, or waiting on an approval. */
-  working: boolean;
+  activity: SessionActivity;
   updatedAt: string | null;
+}
+
+/**
+ * What a session is doing, as T3's sidebar tells it: its turn running or `starting`, stopped on an `approval` or the
+ * user's `input`, `waiting` on other work, `failed`, `done`, or `idle` before any turn or after one was stopped.
+ */
+export type SessionState = "working" | "starting" | "approval" | "input" | "waiting" | "failed" | "done" | "idle";
+
+export interface SessionActivity {
+  state: SessionState;
+  /** Ms since the epoch: when the running turn started, or the last one finished. Null when unknown. */
+  since: number | null;
 }
 
 /** A session in the OpenCode server a VM runs for `vb opencode` and other OpenCode clients. */
@@ -198,7 +208,7 @@ export interface VmOpenCodeSession {
   provider: { id: string; name: string } | null;
   /** The model's name as OpenCode's catalog has it, when the session has a model. */
   model: string | null;
-  working: boolean;
+  activity: SessionActivity;
   /** Ms since the epoch. */
   updatedAt: number;
   /** Reopens its worktree from a terminal in a clone of the repository. Null for the checkout, which has no worktree to open. */

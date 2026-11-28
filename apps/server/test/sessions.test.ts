@@ -5,10 +5,15 @@ import { join } from "node:path";
 import type { Overview } from "@vmbridge/contracts";
 import { openDatabase } from "../src/bun/sqlite.ts";
 import { dashboardKey, databasePath, start } from "../src/index.ts";
+import { threadActivity } from "../src/gateway/types.ts";
 
 const password = "sessions test password";
 let cleanup = async () => {};
-afterEach(() => cleanup());
+afterEach(() => {
+  const run = cleanup;
+  cleanup = async () => {};
+  return run();
+});
 
 test("a VM's sessions name their agent and model as T3 lists them", async () => {
   const dir = mkdtempSync(join(tmpdir(), "vmbridge-sessions-"));
@@ -46,4 +51,23 @@ test("a VM's sessions name their agent and model as T3 lists them", async () => 
     { agent: { kind: "codex", name: "Codex" }, model: "gpt-6" },
     { agent: { kind: null, name: "Pi" }, model: "pi-1" },
   ]);
+});
+
+test("a thread's status is decided as T3's sidebar decides it", () => {
+  const at = "2026-11-28T10:00:00.000Z";
+  const ms = Date.parse(at);
+  const cases: [Record<string, unknown>, ReturnType<typeof threadActivity>][] = [
+    // A question for the user outranks the run it belongs to.
+    [{ status: "running", activeRunId: "r1", pendingRuntimeRequest: { kind: "user_input" } }, { state: "input", since: null }],
+    [{ status: "running", pendingRuntimeRequest: { kind: "command_execution_approval" } }, { state: "approval", since: null }],
+    [{ status: "running", activityRunStartedAt: at }, { state: "working", since: ms }],
+    [{ status: "running", latestRunStartedAt: at, blockedOnThreadWait: true }, { state: "waiting", since: ms }],
+    [{ status: "queued" }, { state: "starting", since: null }],
+    [{ status: "completed", latestRunCompletedAt: at, pendingBackgroundTasks: [{ id: "b1" }] }, { state: "waiting", since: null }],
+    [{ status: "completed", latestRunCompletedAt: at }, { state: "done", since: ms }],
+    [{ status: "failed", latestRunCompletedAt: at }, { state: "failed", since: ms }],
+    [{ status: "interrupted" }, { state: "idle", since: null }],
+    [{ status: "idle" }, { state: "idle", since: null }],
+  ];
+  for (const [thread, activity] of cases) expect(threadActivity(thread)).toEqual(activity);
 });

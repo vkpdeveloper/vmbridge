@@ -11,7 +11,8 @@ export interface OpenCodeSession {
   provider: { id: string; name: string } | null;
   model: string | null;
   updatedAt: number;
-  working: boolean;
+  /** Ms since the epoch: when VM Bridge first saw its agent running, or null while it is not. */
+  workingSince: number | null;
 }
 
 /** A session as OpenCode lists it: the ids of its provider and model, not their names. */
@@ -80,7 +81,7 @@ export async function readOpenCodeSessions(server: OpenCodeServer): Promise<List
       providerId: typeof entry.model?.providerID === "string" ? entry.model.providerID : null,
       modelId: typeof entry.model?.id === "string" ? entry.model.id : null,
       updatedAt: typeof entry.time?.updated === "number" ? entry.time.updated : 0,
-      working: working.has(entry.id),
+      workingSince: working.has(entry.id) ? Date.now() : null,
     });
   }
   return sessions;
@@ -147,7 +148,12 @@ export function describeOpenCodeSessions(sessions: readonly OpenCodeSession[], v
         branch: worktree && usefulBranch(worktree) ? worktree.branch : null,
         provider: session.provider,
         model: session.model,
-        working: session.working,
+        activity: session.workingSince
+          ? { state: "working", since: session.workingSince }
+          : // A session with a model has had a turn, which ended.
+            session.model
+            ? { state: "done", since: session.updatedAt }
+            : { state: "idle", since: null },
         updatedAt: session.updatedAt,
         resumeCommand: worktree ? `vb opencode resume ${worktree.name}` : null,
       });
@@ -187,7 +193,9 @@ export class OpenCodeSessions {
     const listed = await readOpenCodeSessions(server).catch(() => null);
     if (!listed) return;
     const catalog = await this.catalog(vmId, server, listed);
-    const sessions = listed.map((session) => named(session, catalog));
+    // OpenCode does not say when a turn started, so a running one counts from when it was first seen running.
+    const before = new Map(this.get(vmId).map((session) => [session.id, session.workingSince]));
+    const sessions = listed.map((session) => named({ ...session, workingSince: session.workingSince && (before.get(session.id) ?? session.workingSince) }, catalog));
     if (JSON.stringify(sessions) === JSON.stringify(this.get(vmId))) return;
     this.latest.set(vmId, sessions);
     this.fleet.emit("changed");
