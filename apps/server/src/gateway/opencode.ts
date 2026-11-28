@@ -574,18 +574,22 @@ export class OpenCodeGateway {
     for (const name of droppedRequestHeaders) headers.delete(name);
     headers.set("accept-encoding", "identity");
     const hasBody = request.method !== "GET" && request.method !== "HEAD" && request.body !== null;
+    const signal = AbortSignal.any([request.signal, this.endSignal(vmId)]);
+    // OpenCode's terminal app gives up on an event stream that shows no event within 2 seconds, which starting OpenCode
+    // after a wake takes longer than. Asking for it would only fail, so the VM is not asked.
+    if (signal.aborted) {
+      seen.failure = "The client stopped waiting";
+      return problem(499, "The client stopped waiting.");
+    }
     // Held awake until OpenCode answers. An event stream after that counts only as its requests do.
     const release = this.fleet.lease(vmId);
     let upstream: Response;
     try {
-      upstream = await server.fetch(path, {
-        method: request.method,
-        headers,
-        ...(hasBody ? { body: request.body, duplex: "half" } : {}),
-        signal: AbortSignal.any([request.signal, this.endSignal(vmId)]),
-      });
+      upstream = await server.fetch(path, { method: request.method, headers, ...(hasBody ? { body: request.body, duplex: "half" } : {}), signal });
     } catch (error) {
-      if (error instanceof OpenCodeUnreachable) this.fleet.forgetOpenCode(vmId, server);
+      // A request the client gave up on, or that the VM's sleep ended, says nothing of the server. Forgetting it would
+      // start OpenCode again for the client's next try, which it gives up on too, so the app would never reconnect.
+      if (error instanceof OpenCodeUnreachable && !signal.aborted) this.fleet.forgetOpenCode(vmId, server);
       throw error;
     } finally {
       release();

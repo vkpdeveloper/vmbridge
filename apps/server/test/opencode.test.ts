@@ -45,7 +45,8 @@ afterAll(() => vm.stop(true));
 
 const preview = (port: number) => ({ url: `http://127.0.0.1:${port}/?preview_token=${previewToken}`, headers: { "x-preview": previewHeader } });
 
-function setup({ awake = true, wakeMs = 0, wakeWaitMs = 1_000, port = vm.port } = {}) {
+/** `startMs` is how long starting OpenCode takes, as after a wake. A started server is kept until it is forgotten, as Fleet keeps it. */
+function setup({ awake = true, wakeMs = 0, wakeWaitMs = 1_000, port = vm.port, startMs = 0 } = {}) {
   const db = openDatabase(":memory:");
   const store = new Store(db, testEncryption);
   store.insertVm({ id: "vm1", provider: "kubi", name: "vm1", size: "medium", state: awake ? "ready" : "sleeping", createdAt: 0 });
@@ -53,9 +54,14 @@ function setup({ awake = true, wakeMs = 0, wakeWaitMs = 1_000, port = vm.port } 
   store.addProjectVm("p1", "vm1");
   store.setOpenCodePassword("p1", projectPassword);
   store.setOpenCodePassword("p2", "other-pass");
-  const calls = { place: [] as string[], wake: 0, forgot: 0, branch: "fix/login" as string | null };
+  const calls = { place: [] as string[], wake: 0, forgot: 0, starts: 0, branch: "fix/login" as string | null };
   let up = awake;
-  const server = new OpenCodeServer("vm1", preview(port ?? 0), vmPassword, openSocket);
+  let kept: Promise<OpenCodeServer> | undefined;
+  const start = async () => {
+    calls.starts++;
+    await Bun.sleep(startMs);
+    return new OpenCodeServer("vm1", preview(port ?? 0), vmPassword, openSocket);
+  };
   const fleet = Object.assign(new EventEmitter(), {
     machineReady: () => up,
     place: async (projectId: string) => {
@@ -68,7 +74,7 @@ function setup({ awake = true, wakeMs = 0, wakeWaitMs = 1_000, port = vm.port } 
       await Bun.sleep(wakeMs);
       up = true;
     },
-    opencode: async () => server,
+    opencode: () => (kept ??= start()),
     // What git on the VM says of the worktree, when the VM is awake.
     worktreeState: async (_vmId: string, _projectId: string, _name: string, base: string | null) =>
       up ? { branch: calls.branch, sync: { base: base ?? "main", ahead: 2, behind: 1 }, ports: [5173] } : null,
@@ -76,7 +82,13 @@ function setup({ awake = true, wakeMs = 0, wakeWaitMs = 1_000, port = vm.port } 
     openSocket,
     lease: () => () => {},
     touch: () => {},
-    forgetOpenCode: () => void calls.forgot++,
+    forgetOpenCode: (_vmId: string, server: OpenCodeServer) => {
+      calls.forgot++;
+      const current = kept;
+      void current?.then((started) => {
+        if (started === server && kept === current) kept = undefined;
+      });
+    },
   }) as unknown as Fleet;
   const pullRequests: { repository: string; branch: string }[] = [];
   const pullRequest = async (repository: string, branch: string) => {
@@ -336,6 +348,26 @@ describe("OpenCode gateway", () => {
     expect(response.headers.get("retry-after")).toBe("10");
     expect(calls.place).toEqual([]);
     expect(calls.wake).toBe(0);
+  });
+
+  test("an event stream the client gave up on while OpenCode started keeps the server, so the client's next try connects", async () => {
+    // As OpenCode's terminal app: a try that shows no event within 2 seconds (here 100 ms) is given up, and the next
+    // starts a second later (here 200 ms). Starting OpenCode after a wake, or checking it after VM Bridge restarted,
+    // takes longer than a try waits, so a client could connect only to a server started for an earlier try.
+    const { gateway, calls } = setup({ startMs: 250 });
+    const decoder = new TextDecoder();
+    let connected = false;
+    for (let attempt = 0; attempt < 8 && !connected; attempt++) {
+      const signal = AbortSignal.timeout(100);
+      const gaveUp = new Promise<null>((resolve) => signal.addEventListener("abort", () => resolve(null)));
+      const answer = send(gateway, "/opencode/p1/api/event", { headers: { authorization: basic(projectPassword) }, signal });
+      const first = await Promise.race([answer.then((response) => (response.ok ? response.body!.getReader().read() : null)), gaveUp]);
+      connected = Boolean(first?.value && decoder.decode(first.value).includes("server."));
+      if (!connected) await Bun.sleep(200);
+    }
+    expect(connected).toBe(true);
+    expect(calls.starts).toBe(1);
+    expect(calls.forgot).toBe(0);
   });
 
   test("an event stream gets a toast naming the VM, for the folder the app works in, between OpenCode's events", async () => {
