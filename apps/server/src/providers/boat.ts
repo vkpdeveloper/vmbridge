@@ -224,9 +224,10 @@ export function boat(options: BoatOptions): BoatProvider {
     );
     const all = Object.values(parts).flat();
     await guest(id, `mkdir -p /tmp/.sandbox-sdk && mkdir -m 700 -- ${quote(dir)} && (umask 077 && touch -- ${all.map(quote).join(" ")})`);
-    for (const [name, data] of Object.entries(files)) {
-      for (const [index, part] of parts[name]!.entries()) await upload(id, part, data.subarray(index * partBytes, (index + 1) * partBytes));
-    }
+    // Each part is its own file, so they go up together: every request is a round trip to Boat.
+    await Promise.all(
+      Object.entries(files).flatMap(([name, data]) => parts[name]!.map((part, index) => upload(id, part, data.subarray(index * partBytes, (index + 1) * partBytes)))),
+    );
     const join = Object.entries(parts)
       .map(([name, paths]) => `cat -- ${paths.map(quote).join(" ")} > ${quote(`${dir}/${name}`)}`)
       .join(" && ");
@@ -333,10 +334,14 @@ export function boat(options: BoatOptions): BoatProvider {
       let stdin = "/dev/null";
       if (dir) {
         const encoder = new TextEncoder();
-        const env = encoder.encode(privateEnv.map(([name, value]) => `export ${name}=${quote(value)}\n`).join(""));
-        const staged = await stage(id, dir, { env, stdin: encoder.encode(input.stdin ?? "") });
-        stdin = `${dir}/stdin`;
-        setup = `${staged.join} && . ${quote(`${dir}/env`)} || ${setupFailed}; `;
+        // Only what the command has: an empty file would still cost an upload.
+        const files: Record<string, Uint8Array> = {};
+        if (privateEnv.length) files.env = encoder.encode(privateEnv.map(([name, value]) => `export ${name}=${quote(value)}\n`).join(""));
+        if (input.stdin) files.stdin = encoder.encode(input.stdin);
+        const staged = await stage(id, dir, files);
+        if (files.stdin) stdin = `${dir}/stdin`;
+        const sourceEnv = files.env ? ` && . ${quote(`${dir}/env`)}` : "";
+        setup = `${staged.join}${sourceEnv} || ${setupFailed}; `;
       }
       // Timed out or aborted while the files went up: never started, and `finally` removes the files.
       if (isCancelled || input.signal?.aborted) return { exitCode: null, timedOut: true };

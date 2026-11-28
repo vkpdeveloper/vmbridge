@@ -258,6 +258,15 @@ describe("Boat API", () => {
     expect(uploads).toEqual(["export API_TOKEN='tok_very_secret'\n", "stdin_secret"]);
   });
 
+  test("a command with stdin and no secrets uploads only its stdin", async () => {
+    const { calls, provider } = fakeBoat();
+    await provider.exec("sb_1", { command: "bash -s", cwd: "/workspace", env: { CI: "1" }, stdin: "echo hi", timeoutMs: 10_000, onChunk: () => {} });
+    const uploads = calls.filter((call) => call.path === "/sandboxes/sb_1/files").map((call) => JSON.parse(call.body).path as string);
+    expect(uploads.map((path) => path.split("/").at(-1))).toEqual(["stdin.0"]);
+    const launched = calls.filter((call) => call.path === "/sandboxes/sb_1/commands").at(-1)!.body;
+    expect(launched).not.toContain("/env");
+  });
+
   test("a frame cut off when the stream drops is not parsed: the follower reconnects and gets the output again", async () => {
     const { provider } = fakeBoat(`${JSON.stringify({ type: "stdout", data: "hel", nextOffset: 3 })}\n{"type":"stdout","da`);
     let output = "";
