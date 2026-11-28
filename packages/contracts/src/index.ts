@@ -60,6 +60,21 @@ export interface ProviderInfo {
   signIn: ProviderSignIn | null;
 }
 
+/**
+ * How a Boat connect ended, sent back to the dashboard as `?boat=`. Only these words, never free text, so a link
+ * someone else made cannot show its own message in the dashboard.
+ */
+export const boatOutcomes = {
+  connected: "Boat connected.",
+  invalid: "This Boat sign-in link is not for this VM Bridge. Connect again.",
+  expired: "The Boat sign-in took too long. Connect again.",
+  denied: "Boat access was not allowed.",
+  refused: "Boat did not accept the sign-in. Connect again.",
+  "not-added": "Boat is connected, but could not be added. Add it below.",
+  failed: "The Boat sign-in failed. Connect again.",
+} as const;
+export type BoatOutcome = keyof typeof boatOutcomes;
+
 export interface ProviderSignIn {
   connected: boolean;
   /** The connected account's email or login, when the provider said. */

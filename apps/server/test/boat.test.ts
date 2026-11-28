@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { boat } from "../src/providers/boat.ts";
 import { BoatSignIn, boatClientId } from "../src/providers/boat-sign-in.ts";
 import type { Credentials } from "../src/providers/types.ts";
+import { GET as relay } from "../../landing/app/boat/callback/route.ts";
 
 /** Secrets kept in memory, as the database would keep them. */
 function memorySecrets() {
@@ -124,6 +125,42 @@ describe("Boat sign-in", () => {
     expect(await signIn.token()).toBe("boat_access_2");
   });
 
+  test("a disconnect while a refresh is on its way is not undone by the refresh's answer", async () => {
+    let answer = () => {};
+    const { secrets, signIn } = await connected(async (url, init) => {
+      if (url.endsWith("/oauth2/revoke")) return new Response(null, { status: 200 });
+      if (!url.endsWith("/oauth2/token")) return json({ user: { login: "a" } });
+      if (form(init).get("grant_type") === "authorization_code") return json(tokens(1));
+      await new Promise<void>((resolve) => (answer = resolve));
+      return json(tokens(2));
+    });
+    expireSoon(secrets);
+    const refresh = signIn.refresh();
+    await Bun.sleep(5);
+    expect(await signIn.disconnect()).toBe(true);
+    answer();
+    await refresh;
+    expect(signIn.status().connected).toBe(false);
+  });
+
+  test("connecting again gives up the earlier connection's access on Boat", async () => {
+    const revoked: string[] = [];
+    let n = 0;
+    const fetcher = async (url: string, init: RequestInit) => {
+      if (url.endsWith("/oauth2/revoke")) {
+        revoked.push(form(init).get("token")!);
+        return new Response(null, { status: 200 });
+      }
+      if (url.endsWith("/oauth2/token")) return json(tokens(++n));
+      return json({ user: { login: "a" } });
+    };
+    const { signIn } = await connected(fetcher);
+    const state = new URL(await signIn.start("https://bridge.example.ts.net", "/dashboard")).searchParams.get("state")!;
+    await signIn.finish(new URLSearchParams({ code: "code_2", state }));
+    expect(revoked).toEqual(["boatrt_1"]);
+    expect(await signIn.token()).toBe("boat_access_2");
+  });
+
   test("a refresh token Boat refuses ends the connection", async () => {
     const { secrets, signIn } = await connected(async (url, init) => {
       if (!url.endsWith("/oauth2/token")) return json({ user: { login: "a" } });
@@ -202,5 +239,25 @@ describe("Boat API", () => {
     const { calls, provider } = fakeBoat();
     await provider.files.mkdir("sb_1", "/tmp/x");
     expect(calls.map((call) => call.authorization)).toEqual(["Bearer boat_access_1", "Bearer boat_access_2"]);
+  });
+});
+
+describe("Boat callback page", () => {
+  const callback = (state: string) => relay(new Request(`https://vmbridge.ordinity.com/boat/callback?code=c&state=${encodeURIComponent(state)}`));
+  const stateFor = (origin: string) => `${Buffer.from(origin).toString("base64url")}.random`;
+
+  test("asks before handing the code to the address in state, and never forwards it on its own", async () => {
+    const response = callback(stateFor("https://attacker.example"));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("location")).toBeNull();
+    const html = await response.text();
+    expect(html).toContain("https://attacker.example");
+    expect(html).toContain('href="https://attacker.example/admin/api/providers/boat/callback?code=c&amp;state=');
+  });
+
+  test("refuses a state that is not an http(s) origin", async () => {
+    for (const origin of ["javascript:alert(1)", "https://a.example/path", "https://user@a.example", "<script>"]) {
+      expect(callback(stateFor(origin)).status).toBe(400);
+    }
   });
 });

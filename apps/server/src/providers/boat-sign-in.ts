@@ -1,6 +1,7 @@
+import { timingSafeEqual } from "node:crypto";
 import { SandboxError } from "@opencoredev/sandbox-sdk";
 import type { Fetch } from "@opencoredev/sandbox-sdk/provider";
-import type { ProviderSignIn } from "@vmbridge/contracts";
+import type { BoatOutcome, ProviderSignIn } from "@vmbridge/contracts";
 import { sleep } from "../runtime.ts";
 import type { Secrets } from "../settings.ts";
 import type { Credentials } from "./types.ts";
@@ -18,7 +19,9 @@ import type { Credentials } from "./types.ts";
  * runs one process and a Worker one Durable Object, so a promise in memory is enough to keep it to one.
  */
 
-export const boatClientId = "boatapp_WyVQRBIeJPzt2s8xynbGJpVc";
+// Release builds bake in the ID from the repository's secret (scripts/compile.ts). Cloudflare and source installs
+// build without it, so they use this one. It is no secret: Boat shows it in every sign-in link.
+export const boatClientId = process.env.VMBRIDGE_BOAT_CLIENT_ID || "boatapp_WyVQRBIeJPzt2s8xynbGJpVc";
 export const boatRedirectUri = process.env.VMBRIDGE_BOAT_REDIRECT_URI || "https://vmbridge.ordinity.com/boat/callback";
 const authorizeUrl = "https://boat.dev/api/boat/oauth2/authorize";
 const tokenUrl = "https://boat.dev/api/boat/oauth2/token";
@@ -85,7 +88,22 @@ interface TokenResponse {
   expires_in: number;
 }
 
-export class BoatSignInError extends Error {}
+/** A connect that did not finish. `outcome` is all the dashboard is told, so nobody can put words in its toast. */
+export class BoatSignInError extends Error {
+  constructor(
+    readonly outcome: BoatOutcome,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** Compares without leaking how much of `a` matched, as this route takes guesses from anyone. */
+function same(a: string, b: string) {
+  const left = new TextEncoder().encode(a);
+  const right = new TextEncoder().encode(b);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
 
 const base64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 const random = (size: number) => base64url(crypto.getRandomValues(new Uint8Array(size)));
@@ -154,18 +172,20 @@ export class BoatSignIn implements Credentials {
     const text = this.secrets.get(pendingName);
     const pending = text ? (JSON.parse(text) as Pending) : null;
     const state = query.get("state");
-    if (!pending || !state || state !== pending.state) throw new BoatSignInError("This Boat sign-in link is not for this VM Bridge. Connect again from Accounts.");
+    if (!pending || !state || !same(state, pending.state)) throw new BoatSignInError("invalid", "This Boat sign-in link is not for this VM Bridge. Connect again from Accounts.");
     // One use only.
     this.secrets.set(pendingName, null);
-    if (Date.now() - pending.startedAt > pendingMs) throw new BoatSignInError("The Boat sign-in took too long. Connect again.");
-    if (query.get("error") === "access_denied") throw new BoatSignInError("Boat access was not allowed.");
+    if (Date.now() - pending.startedAt > pendingMs) throw new BoatSignInError("expired", "The Boat sign-in took too long. Connect again.");
+    if (query.get("error") === "access_denied") throw new BoatSignInError("denied", "Boat access was not allowed.");
     const code = query.get("code");
-    if (!code) throw new BoatSignInError("Boat sent back no sign-in code. Connect again.");
+    if (!code) throw new BoatSignInError("invalid", "Boat sent back no sign-in code. Connect again.");
     const tokens = await this.tokens(
       { grant_type: "authorization_code", code, redirect_uri: boatRedirectUri, code_verifier: pending.verifier },
       "Boat did not accept the sign-in. Connect again.",
     );
     const now = Date.now();
+    // Connecting again replaces an earlier connection, whose access is given up rather than left alive on Boat.
+    const earlier = this.saved();
     this.save({
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
@@ -174,6 +194,7 @@ export class BoatSignIn implements Credentials {
       connectedAt: now,
       account: await this.account(tokens.access_token),
     });
+    if (earlier) await this.revoke(earlier.refreshToken);
     return pending.back;
   }
 
@@ -189,16 +210,27 @@ export class BoatSignIn implements Credentials {
     }
   }
 
-  /** Revokes VM Bridge's access on Boat, then forgets the tokens. Forgets them even when Boat cannot be reached. */
-  async disconnect(): Promise<void> {
+  /**
+   * Forgets the tokens, then revokes VM Bridge's access on Boat. Forgets them even when Boat cannot be reached, and
+   * returns false then, so the person can end the access on Boat themselves.
+   */
+  async disconnect(): Promise<boolean> {
     const saved = this.saved();
     this.save(null);
-    if (!saved) return;
-    await this.fetcher(revokeUrl, {
-      method: "POST",
-      body: new URLSearchParams({ token: saved.refreshToken, client_id: boatClientId }),
-      signal: AbortSignal.timeout(10_000),
-    }).catch(() => undefined);
+    return saved ? await this.revoke(saved.refreshToken) : true;
+  }
+
+  private async revoke(refreshToken: string): Promise<boolean> {
+    try {
+      const response = await this.fetcher(revokeUrl, {
+        method: "POST",
+        body: new URLSearchParams({ token: refreshToken, client_id: boatClientId }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
   }
 
   async token(): Promise<string> {
@@ -238,6 +270,9 @@ export class BoatSignIn implements Credentials {
     // Requests sent with the access token a refresh just replaced fail with 401 and ask again. The new one is fine.
     if (Date.now() - saved.refreshedAt < 30_000) return;
     const tokens = await this.tokens({ grant_type: "refresh_token", refresh_token: saved.refreshToken }, null);
+    // A disconnect or a new connect while Boat answered wins: these tokens belong to a connection that is gone.
+    const current = this.saved();
+    if (current?.refreshToken !== saved.refreshToken || current.connectedAt !== saved.connectedAt) return;
     const now = Date.now();
     this.save({ ...saved, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiresAt: now + tokens.expires_in * 1000, refreshedAt: now });
   }
@@ -264,9 +299,10 @@ export class BoatSignIn implements Credentials {
       if (response && response.status < 500) {
         const json = (await response.json().catch(() => null)) as (Partial<TokenResponse> & { error?: string }) | null;
         if (response.ok && json?.access_token && json.refresh_token && typeof json.expires_in === "number") return json as TokenResponse;
-        if (refused !== null) throw new BoatSignInError(refused);
+        if (refused !== null) throw new BoatSignInError("refused", refused);
         if (json?.error === "invalid_grant") {
-          this.save(null);
+          // Unless a new connect replaced it meanwhile.
+          if (this.saved()?.refreshToken === form.refresh_token) this.save(null);
           throw lost();
         }
         throw new SandboxError(`Boat refused to refresh VM Bridge's access (HTTP ${response.status}).`, { code: "auth", provider: "boat" });

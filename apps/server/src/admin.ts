@@ -14,6 +14,7 @@ import {
   type VmSize,
   type BridgeUpdate,
   type OpenCodeConnection,
+  type BoatOutcome,
 } from "@vmbridge/contracts";
 import { analyticsReport } from "./analytics.ts";
 import { InvalidSignIn, type AgentAuth, type TokenInput } from "./agent-auth/profiles.ts";
@@ -348,15 +349,19 @@ export class Admin {
       }
       if (id === "boat" && action === "connect" && method === "POST") {
         const back = (await body(request)).back;
-        if (typeof back !== "string" || !back.startsWith("/dashboard") || back.startsWith("//")) throw new BadRequest("Say which dashboard page to come back to.");
+        // Checked after the URL parser has resolved it, as the redirect back will be: `/dashboard/..//x` is `//x`.
+        const resolved = typeof back === "string" ? new URL(back, "http://bridge") : null;
+        if (!resolved || resolved.origin !== "http://bridge" || !/^\/dashboard(\/|$)/.test(resolved.pathname)) {
+          throw new BadRequest("Say which dashboard page to come back to.");
+        }
         // The address the browser uses, which sameOrigin checked against the host. Boat's page sends it back there.
         const origin = request.headers.get("origin") ?? new URL(request.url).origin;
-        return json({ url: await this.deps.boat.start(origin, back) });
+        return json({ url: await this.deps.boat.start(origin, `${resolved.pathname}${resolved.search}`) });
       }
       if (id === "boat" && action === "disconnect" && method === "POST") {
-        await this.deps.boat.disconnect();
+        const revoked = await this.deps.boat.disconnect();
         this.signInChanged(id);
-        return json(this.providerInfo(id));
+        return json({ provider: this.providerInfo(id), revoked });
       }
       if (action === "setup" && method === "POST") {
         if (!settings.get("providers").includes(id)) throw new BadRequest(`Add ${definition.label} first.`);
@@ -378,6 +383,11 @@ export class Admin {
           this.deps.traffic.record({ kind: "provider", operation: "remove provider", provider: id, status: "error", reason: message(error) }),
         );
         if (settings.get("defaultProvider") === id) settings.set("defaultProvider", remaining[0] ?? null);
+        // A removed provider's sign-in is not kept alive on Boat by the daily refresh.
+        if (id === "boat" && this.deps.boat.status().connected) {
+          await this.deps.boat.disconnect();
+          this.signInChanged(id);
+        }
         this.providersChanged();
         return json(this.providerInfo(id));
       }
@@ -714,11 +724,11 @@ export class Admin {
 
   /**
    * Where Boat's page sends the browser after the person chose (through VM Bridge's website, see BoatSignIn). Goes
-   * back to the dashboard page the connect started on, adding Boat when it is not added yet, with `boat=connected` or
-   * `boat=` and what went wrong.
+   * back to the dashboard page the connect started on, adding Boat when it is not added yet, with `boat=` and how it
+   * ended. Details go to the traffic log, not the address.
    */
   private async boatCallback(request: Request): Promise<Response> {
-    const go = (back: string, outcome: string) => {
+    const go = (back: string, outcome: BoatOutcome) => {
       const url = new URL(back, "http://bridge");
       url.searchParams.set("boat", outcome);
       return new Response(null, { status: 303, headers: { location: `${url.pathname}${url.search}`, "referrer-policy": "no-referrer", "cache-control": "no-store" } });
@@ -727,14 +737,16 @@ export class Admin {
     try {
       back = await this.deps.boat.finish(new URL(request.url).searchParams);
     } catch (error) {
-      return go("/dashboard?view=accounts&tab=provider", error instanceof BoatSignInError ? error.message : `Boat sign-in failed: ${message(error)}`);
+      this.deps.traffic.record({ kind: "provider", operation: "connect Boat", provider: "boat", status: "error", reason: message(error) });
+      return go("/dashboard?view=accounts&tab=provider", error instanceof BoatSignInError ? error.outcome : "failed");
     }
     this.signInChanged("boat");
     if (!this.deps.settings.get("providers").includes("boat")) {
       try {
         await this.addProvider("boat");
       } catch (error) {
-        return go(back, `Connected, but Boat could not be added: ${message(error)}`);
+        this.deps.traffic.record({ kind: "provider", operation: "add provider", provider: "boat", status: "error", reason: message(error) });
+        return go(back, "not-added");
       }
     }
     return go(back, "connected");

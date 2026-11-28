@@ -320,6 +320,10 @@ export function boat(options: BoatOptions): BoatProvider {
     }
 
     try {
+      // Every way out of the command line removes the private files: the command as it starts, a failed setup before
+      // it exits, and `finally` below for a command that never ran.
+      const removeDir = dir ? `/bin/rm -rf -- ${quote(dir)}; ` : "";
+      const setupFailed = `{ ${removeDir}echo setup-failed > ${quote(marker)}; exit ${setupExit}; }`;
       let setup = "";
       let stdin = "/dev/null";
       if (dir) {
@@ -327,12 +331,11 @@ export function boat(options: BoatOptions): BoatProvider {
         const env = encoder.encode(privateEnv.map(([name, value]) => `export ${name}=${quote(value)}\n`).join(""));
         const staged = await stage(id, dir, { env, stdin: encoder.encode(input.stdin ?? "") });
         stdin = `${dir}/stdin`;
-        setup = `${staged.join} && . ${quote(`${dir}/env`)} || { echo setup-failed > ${quote(marker)}; exit ${setupExit}; }; `;
+        setup = `${staged.join} && . ${quote(`${dir}/env`)} || ${setupFailed}; `;
       }
       if (input.signal?.aborted) return { exitCode: null, timedOut: true };
-      const removeDir = dir ? `/bin/rm -rf -- ${quote(dir)}; ` : "";
       const line =
-        `(${prepareWorkspace}) || { echo setup-failed > ${quote(marker)}; exit ${setupExit}; }; ${setup}` +
+        `(${prepareWorkspace}) || ${setupFailed}; ${setup}` +
         `{ ${removeDir}(${exports}cd ${quote(input.cwd)} && exec sh -c ${quote(input.command)}); } < ${quote(stdin)}`;
       started = true;
       const launched = await command(id, { command: line, detached: true });
