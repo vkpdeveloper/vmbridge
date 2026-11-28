@@ -229,6 +229,9 @@ export async function start(options: StartOptions = {}) {
     ...(host ? [] : [addresses]),
     ...(compiled ? [release.job] : []),
   ]);
+  // Timers first run an hour from now, and a server restarted more often than that would never refresh an idle Boat
+  // connection. Workers' first alarm already runs every job.
+  void boat.keepFresh().catch(() => {});
   void fleet.resume();
   // Accounts saved by older versions lack the details the dashboard shows.
   const githubToken = secrets.get("github.token");

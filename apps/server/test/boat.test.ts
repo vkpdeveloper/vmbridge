@@ -176,7 +176,7 @@ describe("Boat sign-in", () => {
 
 describe("Boat API", () => {
   /** A fake Boat API that runs one background command and streams its output, dropping the stream once. */
-  function fakeBoat() {
+  function fakeBoat(firstStream?: string) {
     const calls: { method: string; path: string; body: string; authorization: string | null }[] = [];
     let streams = 0;
     let token = "boat_access_1";
@@ -200,6 +200,7 @@ describe("Boat API", () => {
       if (path === "/sandboxes/sb_1/files") return json({ ok: true });
       if (path === "/sandboxes/sb_1/commands/7/stream") {
         streams++;
+        if (streams === 1 && firstStream !== undefined) return new Response(firstStream);
         const frames =
           streams === 1
             ? [{ type: "attached", stdoutOffset: 0, stderrOffset: 0 }, { type: "stdout", data: "hel", nextOffset: 3 }, { type: "reconnect", stdoutOffset: 3 }]
@@ -233,6 +234,14 @@ describe("Boat API", () => {
     expect(commands.at(-1)).toContain("export CI='1'");
     const uploads = calls.filter((call) => call.path === "/sandboxes/sb_1/files").map((call) => Buffer.from(JSON.parse(call.body).content, "base64").toString());
     expect(uploads).toEqual(["export API_TOKEN='tok_very_secret'\n", "stdin_secret"]);
+  });
+
+  test("a frame cut off when the stream drops is not parsed: the follower reconnects and gets the output again", async () => {
+    const { provider } = fakeBoat(`${JSON.stringify({ type: "stdout", data: "hel", nextOffset: 3 })}\n{"type":"stdout","da`);
+    let output = "";
+    const result = await provider.exec("sb_1", { command: "x", cwd: "/workspace", env: {}, timeoutMs: 10_000, onChunk: (chunk) => (output += chunk.text) });
+    expect(result).toEqual({ exitCode: 3, timedOut: false });
+    expect(output).toBe("hello");
   });
 
   test("a refused token is refreshed once and the request sent again with the new one", async () => {

@@ -139,7 +139,8 @@ async function* lines(body: ReadableStream<Uint8Array>) {
       if (line) yield line;
     }
   }
-  if (buffered.trim()) yield buffered.trim();
+  // A last line with no newline is a frame cut off when the stream dropped, so it is left out: the follower reconnects
+  // from the offsets it has, and Boat sends that output again.
 }
 
 export interface BoatOptions {
@@ -303,8 +304,12 @@ export function boat(options: BoatOptions): BoatProvider {
     let finished = false;
     const controller = new AbortController();
     let cancel = () => {};
+    let isCancelled = false;
     const cancelled = new Promise<"cancelled">((resolve) => {
-      cancel = () => resolve("cancelled");
+      cancel = () => {
+        isCancelled = true;
+        resolve("cancelled");
+      };
     });
     const timer = setTimeout(cancel, input.timeoutMs);
     input.signal?.addEventListener("abort", cancel, { once: true });
@@ -333,7 +338,8 @@ export function boat(options: BoatOptions): BoatProvider {
         stdin = `${dir}/stdin`;
         setup = `${staged.join} && . ${quote(`${dir}/env`)} || ${setupFailed}; `;
       }
-      if (input.signal?.aborted) return { exitCode: null, timedOut: true };
+      // Timed out or aborted while the files went up: never started, and `finally` removes the files.
+      if (isCancelled || input.signal?.aborted) return { exitCode: null, timedOut: true };
       const line =
         `(${prepareWorkspace}) || ${setupFailed}; ${setup}` +
         `{ ${removeDir}(${exports}cd ${quote(input.cwd)} && exec sh -c ${quote(input.command)}); } < ${quote(stdin)}`;
@@ -592,7 +598,17 @@ export const boatProvider: ProviderDefinition = {
   defaultSize: "small",
 
   open(config) {
-    const credentials = config.signIn ?? apiKeyCredentials(required(config, "apiKey", "Boat API key"));
+    const signIn = config.signIn;
+    const signedIn = () => signIn?.connected() === true;
+    const key = signedIn() ? (config.values.apiKey ? apiKeyCredentials(config.values.apiKey) : null) : apiKeyCredentials(required(config, "apiKey", "Boat API key"));
+    // VMs already open keep this driver's provider, so every request picks what is in use then: after a disconnect,
+    // the saved key, instead of failing until the VM reconnects.
+    const current = () => (signedIn() || !key ? signIn! : key);
+    const credentials: Credentials = {
+      token: () => current().token(),
+      refresh: () => current().refresh(),
+      secretValues: () => [...(signIn?.secretValues() ?? []), ...(key?.secretValues() ?? [])],
+    };
     const provider = boat({ credentials });
     const { client } = provider;
     const base = sdkDriver({ id: "boat", provider, sleep: "pause" });
@@ -633,7 +649,7 @@ export const boatProvider: ProviderDefinition = {
 
       async options(field): Promise<SelectOption[]> {
         if (field !== "environment") return [];
-        if (config.signIn) throw new Error("Connected Boat cannot list environments. To use one, disconnect and pick it on Boat's page when you connect again.");
+        if (signedIn()) throw new Error("Connected Boat cannot list environments. To use one, disconnect and pick it on Boat's page when you connect again.");
         return (await environments()).map((environment) => ({
           value: environment.name,
           label: environment.isDefault ? `${environment.name} (default)` : environment.name,
@@ -643,7 +659,7 @@ export const boatProvider: ProviderDefinition = {
       // A VM from a saved snapshot gets the snapshot's machine type, and `noEnv: false` keeps it from inheriting the
       // snapshot VM's environment choice.
       async create(input, from) {
-        const environment = (!config.signIn && config.values.environment) || undefined;
+        const environment = (!signedIn() && config.values.environment) || undefined;
         const { sandbox } = (await client.json({
           method: "POST",
           path: "/sandboxes",

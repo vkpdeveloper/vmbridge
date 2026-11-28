@@ -4,7 +4,7 @@ import type { Fetch } from "@opencoredev/sandbox-sdk/provider";
 import type { BoatOutcome, ProviderSignIn } from "@vmbridge/contracts";
 import { sleep } from "../runtime.ts";
 import type { Secrets } from "../settings.ts";
-import type { Credentials } from "./types.ts";
+import type { SignIn } from "./types.ts";
 
 /**
  * "Sign in with boat": OAuth with PKCE (docs.boat.dev/oauth-apps) through one public VM Bridge app, so nobody registers
@@ -61,7 +61,7 @@ const pendingMs = 15 * 60_000;
 const refreshEarlyMs = 5 * 60_000;
 /** Boat's docs give no lifetime for an unused refresh token, so a connection never goes longer than this without one. */
 const idleRefreshMs = 24 * 60 * 60_000;
-/** Boat accepts the same refresh again for a minute, for a response that was lost. */
+/** Boat accepts the same refresh again for a minute, for a response that was lost. The last resend leaves before this. */
 const resendWindowMs = 50_000;
 
 interface Saved {
@@ -116,7 +116,7 @@ export function boatState(origin: string) {
   return `${base64url(new TextEncoder().encode(origin))}.${random(32)}`;
 }
 
-export class BoatSignIn implements Credentials {
+export class BoatSignIn implements SignIn {
   private refreshing?: Promise<void>;
 
   constructor(
@@ -131,6 +131,10 @@ export class BoatSignIn implements Credentials {
 
   private save(saved: Saved | null) {
     this.secrets.set(savedName, saved && JSON.stringify(saved));
+  }
+
+  connected(): boolean {
+    return this.saved() !== null;
   }
 
   status(): ProviderSignIn {
@@ -307,13 +311,15 @@ export class BoatSignIn implements Credentials {
         }
         throw new SandboxError(`Boat refused to refresh VM Bridge's access (HTTP ${response.status}).`, { code: "auth", provider: "boat" });
       }
-      if (Date.now() - started > resendWindowMs - 10_000) {
+      // The next send must still reach Boat inside its minute, so a wait that would end past the window is not taken.
+      const wait = 1_000 * 2 ** attempt;
+      if (Date.now() + wait - started > resendWindowMs) {
         throw new SandboxError("Boat did not answer while refreshing VM Bridge's access. It is tried again on the next request.", {
           code: "unavailable",
           provider: "boat",
         });
       }
-      await sleep(1_000 * 2 ** attempt);
+      await sleep(wait);
     }
   }
 

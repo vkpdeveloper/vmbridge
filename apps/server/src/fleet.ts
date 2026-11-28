@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { SandboxError, type Preview } from "@opencoredev/sandbox-sdk";
 import type { ProviderId, ProviderSetup, VmSize, VmState } from "@vmbridge/contracts";
 import { hasScreen, providers, type Box, type Driver } from "./providers/index.ts";
-import type { CreateVm, Credentials } from "./providers/types.ts";
+import type { CreateVm, SignIn } from "./providers/types.ts";
 import { BudgetReached } from "./budget.ts";
 import { envVars, type Settings, type Secrets } from "./settings.ts";
 import { busyNotice, choose, maxVmsPerProject, overflowRetryMs, type VmLoad } from "./placement.ts";
@@ -138,7 +138,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
   onConnect: (vmId: string, backend: Backend) => Promise<void> = async () => {};
 
   /** Providers connected by signing in (see `ProviderDefinition.signIn`). */
-  signIns: Partial<Record<ProviderId, Credentials & { connection(): string | null }>> = {};
+  signIns: Partial<Record<ProviderId, SignIn & { connection(): string | null }>> = {};
 
   /** Why new VMs and wakes are refused now, such as a spent budget (see `Budget.refusal`). Null: they are not. */
   refusal: () => string | null = () => null;
@@ -177,7 +177,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
     const signature = JSON.stringify([values, connection]);
     const cached = this.drivers.get(provider);
     if (cached?.signature === signature) return cached.driver;
-    const driver = providers[provider].open({ values, signIn: connection ? signIn : undefined });
+    const driver = providers[provider].open({ values, signIn });
     this.drivers.set(provider, { signature, driver });
     return driver;
   }

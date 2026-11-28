@@ -109,7 +109,7 @@ export function Providers({ overview, bare }: { overview: Overview; bare?: boole
   // The list loads once per change of providers, while each added provider's setup comes live with the overview.
   const live = list.map((entry) => {
     const added = overview.providers.find((candidate) => candidate.id === entry.id);
-    return added ? { ...entry, setup: added.setup, problem: added.problem } : entry;
+    return added ? { ...entry, setup: added.setup, problem: added.problem, signIn: added.signIn, configured: added.configured } : entry;
   });
   // Back from connecting Boat: the server says how it went in the address.
   useEffect(() => {

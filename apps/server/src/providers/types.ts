@@ -89,8 +89,13 @@ export interface ProviderDefinition {
 export interface ProviderConfig {
   /** Field values by key: secrets and plain options together. */
   values: Record<string, string>;
-  /** A signed-in connection, which the provider uses instead of a key field when present. */
-  signIn?: Credentials;
+  /** The provider's sign-in, connected or not. While connected, the provider uses it instead of its key field. */
+  signIn?: SignIn;
+}
+
+/** A sign-in that can be connected and disconnected while drivers and their VMs stay open. */
+export interface SignIn extends Credentials {
+  connected(): boolean;
 }
 
 /** Bearer credentials that may change while a driver is open, such as OAuth tokens. */
