@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { SandboxError, type Preview } from "@opencoredev/sandbox-sdk";
 import type { ProviderId, ProviderSetup, VmSize, VmState } from "@vmbridge/contracts";
 import { hasScreen, providers, type Box, type Driver } from "./providers/index.ts";
-import type { CreateVm } from "./providers/types.ts";
+import type { CreateVm, Credentials } from "./providers/types.ts";
 import { BudgetReached } from "./budget.ts";
 import { envVars, type Settings, type Secrets } from "./settings.ts";
 import { busyNotice, choose, maxVmsPerProject, overflowRetryMs, type VmLoad } from "./placement.ts";
@@ -137,6 +137,9 @@ export class Fleet extends EventEmitter<FleetEvents> {
   /** Runs once a VM's backend is connected, before anyone else can use it. */
   onConnect: (vmId: string, backend: Backend) => Promise<void> = async () => {};
 
+  /** Providers connected by signing in (see `ProviderDefinition.signIn`). */
+  signIns: Partial<Record<ProviderId, Credentials & { connection(): string | null }>> = {};
+
   /** Why new VMs and wakes are refused now, such as a spent budget (see `Budget.refusal`). Null: they are not. */
   refusal: () => string | null = () => null;
 
@@ -168,10 +171,13 @@ export class Fleet extends EventEmitter<FleetEvents> {
 
   driver(provider: ProviderId): Driver {
     const values = providerValues(this.settings, this.secrets, provider);
-    const signature = JSON.stringify(values);
+    const signIn = this.signIns[provider];
+    // A refresh changes the tokens but not the connection, so it keeps the driver and the VMs connected through it.
+    const connection = signIn?.connection() ?? null;
+    const signature = JSON.stringify([values, connection]);
     const cached = this.drivers.get(provider);
     if (cached?.signature === signature) return cached.driver;
-    const driver = providers[provider].open({ values });
+    const driver = providers[provider].open({ values, signIn: connection ? signIn : undefined });
     this.drivers.set(provider, { signature, driver });
     return driver;
   }

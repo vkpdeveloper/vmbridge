@@ -111,6 +111,17 @@ export function Providers({ overview, bare }: { overview: Overview; bare?: boole
     const added = overview.providers.find((candidate) => candidate.id === entry.id);
     return added ? { ...entry, setup: added.setup, problem: added.problem } : entry;
   });
+  // Back from connecting Boat: the server says how it went in the address.
+  useEffect(() => {
+    const url = new URL(location.href);
+    const outcome = url.searchParams.get("boat");
+    if (outcome === null) return;
+    url.searchParams.delete("boat");
+    history.replaceState(history.state, "", url);
+    setChosen("boat");
+    if (outcome === "connected") toast.success("Boat connected.");
+    else toast.error(outcome);
+  }, []);
   const provider = live.find((entry) => entry.id === chosen);
   const replace = (next: ProviderInfo) => setList((current) => current.map((entry) => (entry.id === next.id ? next : entry)));
 
@@ -182,6 +193,22 @@ function ProviderForm({ provider, onSaved }: { provider: ProviderInfo; onSaved: 
       toast.success(`New VMs now go to ${provider.label}.`);
     });
 
+  const connect = () =>
+    save.run(async () => {
+      const { url } = await api<{ url: string }>(`/providers/${provider.id}/connect`, { body: { back: `${location.pathname}${location.search}` } });
+      location.assign(url);
+    });
+
+  const disconnect = () =>
+    save.run(async () => {
+      onSaved(await api<ProviderInfo>(`/providers/${provider.id}/disconnect`, { body: {} }));
+      toast.success(`${provider.label} disconnected.`);
+    });
+
+  // Signed in, the key's fields are not needed. Saved values stay, and are used again after a disconnect.
+  const connected = provider.signIn?.connected === true;
+  const fields = provider.fields.filter((field) => !(connected && field.keyOnly));
+
   const retry = () =>
     save.run(async () => {
       onSaved(await api<ProviderInfo>(`/providers/${provider.id}/setup`, { body: {} }));
@@ -208,7 +235,24 @@ function ProviderForm({ provider, onSaved }: { provider: ProviderInfo; onSaved: 
         {provider.added && <ProviderSetup provider={provider} busy={save.busy} onRetry={() => void retry()} />}
         {provider.problem && <p className="break-words text-sm text-destructive">{provider.problem}</p>}
         <FieldGroup>
-          {provider.fields.map((field) => {
+          {provider.signIn && (
+            <Field>
+              <FieldLabel>Account</FieldLabel>
+              {connected ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="min-w-0 flex-1 truncate text-sm">{provider.signIn.account ? <Private>{provider.signIn.account}</Private> : "Connected"}</p>
+                  <Button type="button" variant="outline" size="lg" className="px-4" disabled={save.busy} onClick={() => void disconnect()}>
+                    Disconnect
+                  </Button>
+                </div>
+              ) : (
+                <Button type="button" variant="outline" size="lg" className="h-9 self-start px-4" disabled={save.busy} onClick={() => void connect()}>
+                  Connect {provider.label}
+                </Button>
+              )}
+            </Field>
+          )}
+          {fields.map((field) => {
             const id = `field-${provider.id}-${field.key}`;
             if (field.kind === "select") {
               // Fixed choices need no Load, and the first stands for an unset value.

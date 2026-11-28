@@ -21,6 +21,8 @@ export interface ProviderField {
   placeholder?: string;
   /** A `select` field's fixed choices, shown without loading them from the provider. The first is the default. */
   options?: SelectOption[];
+  /** Used only without a sign-in: hidden and ignored while the provider's account is connected. */
+  keyOnly?: boolean;
 }
 
 /** How a provider keeps a VM between bursts of work. */
@@ -54,6 +56,14 @@ export interface ProviderInfo {
   setup: ProviderSetup;
   /** The latest background failure on this provider not since put right, such as a VM or snapshot it could not delete. */
   problem: string | null;
+  /** Present for providers VM Bridge can connect to by signing in (Boat), instead of pasting a key. */
+  signIn: ProviderSignIn | null;
+}
+
+export interface ProviderSignIn {
+  connected: boolean;
+  /** The connected account's email or login, when the provider said. */
+  account: string | null;
 }
 
 /**
