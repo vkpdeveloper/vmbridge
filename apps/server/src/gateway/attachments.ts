@@ -47,6 +47,9 @@ const columns =
  * under the ID that VM gives them. The bytes are dropped once the VM has them.
  */
 export class Attachments {
+  /** Active handover per attachment ID, so concurrent sends hand a file to T3 once instead of twice. */
+  private readonly sending = new Map<string, { vmId: string; promise: Promise<string> }>();
+
   constructor(private readonly db: Sql) {}
 
   /** `attachments.createUploadUrl`: an upload slot with a one-use URL. */
@@ -135,6 +138,7 @@ export class Attachments {
 
   /** `attachments.delete`. */
   remove(attachmentId: string) {
+    this.sending.delete(attachmentId);
     this.db.run("DELETE FROM attachment_uploads WHERE id = ?", attachmentId);
   }
 
@@ -166,9 +170,9 @@ export class Attachments {
     collect(payload);
     const replaced = new Map<string, string>();
     for (const id of ids) {
-      const upload = this.db.one<Upload>(`SELECT ${columns} FROM attachment_uploads WHERE id = ? AND expires_at > ?`, id, Date.now());
+      const vmAttachmentId = await this.send(id, vmId, backend);
       // Not one of VM Bridge's: the VM answers for it as for any unknown attachment.
-      if (upload) replaced.set(id, await this.send(upload, vmId, backend));
+      if (vmAttachmentId !== undefined) replaced.set(id, vmAttachmentId);
     }
     if (!replaced.size) return payload;
     const replace = (value: unknown): unknown => {
@@ -180,12 +184,30 @@ export class Attachments {
     return replace(payload) as T;
   }
 
-  private async send(upload: Upload, vmId: string, backend: Backend): Promise<string> {
-    if (upload.state === "sent") {
-      if (upload.vmId === vmId && upload.vmAttachmentId) return upload.vmAttachmentId;
-      throw new Error(`Attachment '${upload.name}' went to another VM. Attach it again.`);
+  private async send(id: string, vmId: string, backend: Backend): Promise<string | undefined> {
+    for (;;) {
+      const active = this.sending.get(id);
+      if (active) {
+        if (active.vmId === vmId) return active.promise;
+        await active.promise.catch(() => {});
+        continue;
+      }
+      const upload = this.db.one<Upload>(`SELECT ${columns} FROM attachment_uploads WHERE id = ? AND expires_at > ?`, id, Date.now());
+      if (!upload) return undefined;
+      if (upload.state === "sent") {
+        if (upload.vmId === vmId && upload.vmAttachmentId) return upload.vmAttachmentId;
+        throw new Error(`Attachment '${upload.name}' went to another VM. Attach it again.`);
+      }
+      if (upload.state !== "ready") throw new Error(`Attachment '${upload.name}' has not finished uploading.`);
+      const promise = this.transfer(upload, vmId, backend).finally(() => {
+        if (this.sending.get(id)?.promise === promise) this.sending.delete(id);
+      });
+      this.sending.set(id, { vmId, promise });
+      return promise;
     }
-    if (upload.state !== "ready") throw new Error(`Attachment '${upload.name}' has not finished uploading.`);
+  }
+
+  private async transfer(upload: Upload, vmId: string, backend: Backend): Promise<string> {
     const minted = await backend.call<Wire>("attachments.createUploadUrl", {
       ...(upload.type === "file" ? { type: "file" } : {}),
       name: upload.name,
@@ -206,7 +228,10 @@ export class Attachments {
       body: file.body,
       signal: AbortSignal.timeout(5 * 60_000),
     });
-    if (!response.ok) throw new Error(`The T3 server on VM ${vmId} refused attachment '${upload.name}' (${response.status}).`);
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => {});
+      throw new Error(`The T3 server on VM ${vmId} refused attachment '${upload.name}' (${response.status}).`);
+    }
     this.db.transaction(() => {
       this.db.run("UPDATE attachment_uploads SET state = 'sent', vm_id = ?, vm_attachment_id = ? WHERE id = ?", vmId, attachmentId, upload.id);
       this.db.run("DELETE FROM attachment_chunks WHERE upload_id = ?", upload.id);
