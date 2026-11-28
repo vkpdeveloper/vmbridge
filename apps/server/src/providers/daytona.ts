@@ -1,4 +1,4 @@
-import { connectSandbox } from "@opencoredev/sandbox-sdk";
+import { connectSandbox, SandboxError } from "@opencoredev/sandbox-sdk";
 import { daytona } from "@opencoredev/sandbox-sdk/daytona";
 import { sleep } from "../runtime.ts";
 import { notFound, sdkDriver } from "./sdk.ts";
@@ -17,7 +17,25 @@ const snapshots = { small: "daytona-small", medium: "daytona-medium", large: "da
 const autoStopMinutes = 60;
 
 const failed = new Set(["error", "build_failed", "destroyed", "destroying"]);
+const gone = new Set(["destroyed", "destroying"]);
 const settling = new Set(["stopping", "archiving"]);
+
+function isConflict(error: unknown): boolean {
+  if (!(error instanceof SandboxError)) return false;
+  const { cause } = error;
+  if (typeof cause === "object" && cause !== null && "status" in cause) {
+    return cause.status === 409;
+  }
+  if (typeof cause === "string" && cause.startsWith("{")) {
+    try {
+      const parsed: unknown = JSON.parse(cause);
+      return typeof parsed === "object" && parsed !== null && "status" in parsed && parsed.status === 409;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
 
 export const daytonaProvider: ProviderDefinition = {
   id: "daytona",
@@ -42,11 +60,11 @@ export const daytonaProvider: ProviderDefinition = {
 
     const get = (sandboxId: string) => api.request<DaytonaSandbox>("GET", "/sandbox/{sandboxId}", { params: { sandboxId } });
 
-    async function waitFor(sandboxId: string, done: (state: string) => boolean, timeoutMs: number) {
+    async function waitFor(sandboxId: string, done: (state: string) => boolean, timeoutMs: number): Promise<string> {
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         const sandbox = await get(sandboxId);
-        if (done(sandbox.state)) return;
+        if (done(sandbox.state)) return sandbox.state;
         if (failed.has(sandbox.state)) throw new Error(`Daytona sandbox ${sandboxId} is ${sandbox.state}: ${sandbox.errorReason ?? "no reason given"}.`);
         await sleep(250);
       }
@@ -60,6 +78,47 @@ export const daytonaProvider: ProviderDefinition = {
         await api.request("DELETE", "/snapshots/{id}", { params: { id } });
       } catch (error) {
         if (!notFound(error)) throw error;
+      }
+    }
+
+    async function destroy(sandboxId: string) {
+      const remove = () => api.request("DELETE", "/sandbox/{sandboxId}", { params: { sandboxId } });
+      const readState = async (): Promise<string | undefined> => {
+        try {
+          return (await get(sandboxId)).state;
+        } catch (readError) {
+          if (notFound(readError)) return undefined;
+          throw readError;
+        }
+      };
+
+      try {
+        await remove();
+      } catch (error) {
+        if (notFound(error)) return;
+        if (!isConflict(error)) throw error;
+        // Daytona answers 409 while a stop or delete is already in progress, such as a delete right after sleep.
+        const state = await readState();
+        if (state === undefined || gone.has(state)) return;
+        if (!settling.has(state)) throw error;
+        let next: string;
+        try {
+          next = await waitFor(sandboxId, (current) => !settling.has(current), 3 * 60_000);
+        } catch (waitError) {
+          if (notFound(waitError)) return;
+          throw waitError;
+        }
+        if (gone.has(next)) return;
+        try {
+          await remove();
+        } catch (retryError) {
+          if (notFound(retryError)) return;
+          if (!isConflict(retryError)) throw retryError;
+          // Another delete may have started right after the sandbox finished stopping.
+          const after = await readState();
+          if (after === undefined || gone.has(after)) return;
+          throw retryError;
+        }
       }
     }
 
@@ -84,7 +143,7 @@ export const daytonaProvider: ProviderDefinition = {
           if (sandbox.state !== "started") await waitFor(sandbox.id, (state) => state === "started", 3 * 60_000);
           return await connect(sandbox.id);
         } catch (error) {
-          await base.destroy(sandbox.id).catch(() => undefined);
+          await destroy(sandbox.id).catch(() => undefined);
           throw error;
         }
       },
@@ -137,19 +196,7 @@ export const daytonaProvider: ProviderDefinition = {
       // VM Bridge's idle sweep reads the T3 shell through the preview, and preview traffic resets Daytona's auto-stop.
       async keepAlive() {},
 
-      async destroy(sandboxId) {
-        const remove = () => api.request("DELETE", "/sandbox/{sandboxId}", { params: { sandboxId } });
-        try {
-          await remove();
-        } catch (error) {
-          if (notFound(error)) return;
-          // Daytona answers 409 while a stop is still in progress, such as a delete right after sleep.
-          const { state } = await get(sandboxId);
-          if (!settling.has(state)) throw error;
-          await waitFor(sandboxId, (next) => !settling.has(next), 3 * 60_000);
-          await remove();
-        }
-      },
+      destroy,
     };
   },
 };

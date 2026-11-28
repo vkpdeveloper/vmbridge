@@ -97,6 +97,17 @@ export const boatProvider: ProviderDefinition = {
       }
     }
 
+    async function destroy(sandboxId: string) {
+      try {
+        await api.request("DELETE", "/sandboxes/{sandboxId}", {
+          params: { sandboxId },
+          headers: { "X-Ascii-Confirm-Delete": sandboxId },
+        });
+      } catch (error) {
+        if (!notFound(error)) throw error;
+      }
+    }
+
     return {
       ...base,
 
@@ -135,7 +146,7 @@ export const boatProvider: ProviderDefinition = {
           await waitRunning(sandbox.id);
           return await connect(sandbox.id);
         } catch (error) {
-          await base.destroy(sandbox.id).catch(() => undefined);
+          await destroy(sandbox.id).catch(() => undefined);
           throw error;
         }
       },
@@ -170,8 +181,18 @@ export const boatProvider: ProviderDefinition = {
         // The SDK reports Boat's transitional states as stopped. Keep them apart so a waking VM is not slept again.
         for (const [id, state] of states) {
           if (state !== "stopped") continue;
-          const { state: native } = await get(id);
-          if (running.has(native) || settling.has(native)) states.set(id, "running" satisfies ProviderState);
+          let native: string;
+          try {
+            ({ state: native } = await get(id));
+          } catch (error) {
+            if (notFound(error)) {
+              states.delete(id);
+              continue;
+            }
+            throw error;
+          }
+          if (native === "deleted") states.delete(id);
+          else if (running.has(native) || settling.has(native)) states.set(id, "running" satisfies ProviderState);
         }
         return states;
       },
@@ -204,16 +225,7 @@ export const boatProvider: ProviderDefinition = {
         await api.request("PATCH", "/sandboxes/{sandboxId}", { params: { sandboxId: box.id }, body: { ttlSeconds } });
       },
 
-      async destroy(sandboxId) {
-        try {
-          await api.request("DELETE", "/sandboxes/{sandboxId}", {
-            params: { sandboxId },
-            headers: { "X-Ascii-Confirm-Delete": sandboxId },
-          });
-        } catch (error) {
-          if (!notFound(error)) throw error;
-        }
-      },
+      destroy,
     };
   },
 };
