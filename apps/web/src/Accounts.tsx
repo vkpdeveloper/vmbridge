@@ -196,7 +196,10 @@ function ProviderForm({ provider, onSaved }: { provider: ProviderInfo; onSaved: 
 
   const connect = () =>
     save.run(async () => {
-      const { url } = await api<{ url: string }>(`/providers/${provider.id}/connect`, { body: { back: `${location.pathname}${location.search}` } });
+      // Named, not left to the default: once Boat is set up the default tab becomes Agent sign-in, which would hide the result.
+      const back = new URL(location.href);
+      back.searchParams.set("tab", "provider");
+      const { url } = await api<{ url: string }>(`/providers/${provider.id}/connect`, { body: { back: `${back.pathname}${back.search}` } });
       location.assign(url);
     });
 
