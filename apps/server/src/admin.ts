@@ -29,7 +29,7 @@ import { openCodePrefix, type OpenCodeGateway } from "./gateway/opencode.ts";
 import { newToken } from "./auth/tokens.ts";
 import { githubName } from "./gateway/repos.ts";
 import { agentKind, agentName } from "./gateway/agents.ts";
-import { isWorking, str } from "./gateway/types.ts";
+import { str, threadActivity } from "./gateway/types.ts";
 import { hasScreen, providers } from "./providers/index.ts";
 import { envVars, machineName, saveEnvVars, type Secrets, type Settings } from "./settings.ts";
 import { InstructionsError, isInstructionName } from "./instructions.ts";
@@ -40,6 +40,7 @@ import type { Usage } from "./usage.ts";
 import type { Budget } from "./budget.ts";
 import { envNameProblem, envValueProblem } from "./vm/runtime.ts";
 import type { SkillsState } from "./vm/skills.ts";
+import { describeOpenCodeSessions, type OpenCodeSessions } from "./vm/opencode-sessions.ts";
 import type { Stats } from "./vm/stats.ts";
 import { addressPreference, type Watch } from "./watch/watch.ts";
 
@@ -82,6 +83,7 @@ export interface AdminDeps {
   opencode: OpenCodeGateway;
   agents: AgentAuth;
   stats: Stats;
+  openCodeSessions: OpenCodeSessions;
   skills: Skills;
   usage: Usage;
   budget: Budget;
@@ -736,11 +738,11 @@ export class Admin {
               projectId: typeof thread.projectId === "string" ? thread.projectId : null,
               model: str(listed?.name) ?? slug,
               agent: driver ? { kind: agentKind(driver), name: report?.displayName ?? agentName(driver) } : null,
-              status: String(thread.status ?? "idle"),
-              working: isWorking(thread),
+              activity: threadActivity(thread),
               updatedAt: typeof thread.updatedAt === "string" ? thread.updatedAt : null,
             };
           }),
+          openCodeSessions: describeOpenCodeSessions(this.deps.openCodeSessions.get(vm.id), vm.id, store),
           t3Version: vm.t3Version,
           updatePending: fleet.behind(vm),
           stats: vm.state === "ready" || vm.state === "busy" ? this.deps.stats.get(vm.id) : null,

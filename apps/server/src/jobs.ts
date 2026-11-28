@@ -3,6 +3,7 @@ import type { Fleet } from "./fleet.ts";
 import type { Hub } from "./gateway/hub.ts";
 import type { Traffic } from "./traffic.ts";
 import { heartbeatMs, type Usage } from "./usage.ts";
+import type { OpenCodeSessions } from "./vm/opencode-sessions.ts";
 import type { Stats } from "./vm/stats.ts";
 import type { Watch } from "./watch/watch.ts";
 
@@ -14,8 +15,8 @@ export interface Job {
 }
 
 /** VM Bridge's periodic work. Each run handles its own failures. */
-export function bridgeJobs(deps: { hub: Hub; fleet: Fleet; stats: Stats; usage: Usage; budget: Budget; traffic: Traffic; watch: Watch }): Job[] {
-  const { hub, fleet, stats, usage, budget, traffic, watch } = deps;
+export function bridgeJobs(deps: { hub: Hub; fleet: Fleet; stats: Stats; openCodeSessions: OpenCodeSessions; usage: Usage; budget: Budget; traffic: Traffic; watch: Watch }): Job[] {
+  const { hub, fleet, stats, openCodeSessions, usage, budget, traffic, watch } = deps;
   let budgetLevel = budget.status().level;
   return [
     {
@@ -29,6 +30,7 @@ export function bridgeJobs(deps: { hub: Hub; fleet: Fleet; stats: Stats; usage: 
     { name: "Codex sign-in refresh", everyMs: 60 * 60_000, run: () => fleet.syncCodexAuth().catch(() => {}) },
     // Often enough for the dashboard's high memory warning; opening a VM's details reads it right away.
     { name: "VM stats", everyMs: 30_000, run: () => stats.sampleAll().catch(() => {}) },
+    { name: "OpenCode sessions", everyMs: 15_000, run: () => openCodeSessions.refreshAll().catch(() => {}) },
     {
       name: "usage heartbeat",
       everyMs: heartbeatMs,

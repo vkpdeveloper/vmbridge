@@ -175,15 +175,28 @@ export const copy = {
     stuck: "Still stuck?",
     stuckBody: "The FAQ answers the common questions. Anything else, open an issue on GitHub.",
   },
-  /** The docs section on connecting OpenCode, which reads every line from here. */
+  /** The docs section on OpenCode, which reads every line from here. */
   opencode: {
     /** 30 */
     title: "Use with OpenCode",
     /** 200 */
-    body: "OpenCode connects to VM Bridge like any OpenCode server. Each project gets its own address and password, and its agents run on the project's VM.",
+    body: "Run vb opencode inside a repository. VM Bridge finds or adds its project, picks a VM as it would for a new thread, makes a worktree there and opens OpenCode in it.",
+    /** The command, run inside a repository. */
+    run: "vb opencode",
+    /** About the command. */
+    runNotes: [
+      "Add an OpenCode API key in Accounts first. OpenCode on the VMs uses its models.",
+      "It needs OpenCode 2 on this computer: npm install -g @opencode/cli.",
+      "Each run gets its own worktree on a new opencode/ branch, from your current branch if origin has it, else the default branch. --branch picks another.",
+      "When you close OpenCode, the worktree goes, unless it has changes or commits that are not pushed.",
+      "vb opencode resume lists the worktrees still on the VMs, last used first, with each one's branch, pull request and whether its VM is running, without waking any. Pick one and OpenCode opens on its VM, in the session you last prompted there.",
+      "On the computer VM Bridge runs on, it signs itself in. On another, run vb login once with a pairing link from Devices.",
+      "vb is a short name for vmbridge.",
+    ],
+    /** 60. Before the steps for connecting an OpenCode app by hand. */
+    connect: "To connect an OpenCode app to a project yourself:",
     /** The steps, in order. */
     steps: [
-      "Add an OpenCode API key in Accounts. OpenCode on the VMs uses its models.",
       "Open a VM on the dashboard and choose Connect OpenCode next to its repository.",
       "In the OpenCode app, choose Connect to a server and paste the address and password, or scan the dialog's QR code from your phone.",
     ],
@@ -192,7 +205,7 @@ export const copy = {
     /** With an example of the address the dashboard shows. */
     command: "opencode --server https://bridge.example.com/opencode/my-project",
     notes: [
-      "The first request wakes the VM. If OpenCode gives up while it wakes, connect again.",
+      "The first request wakes the VM.",
       "Agents keep running after OpenCode closes. The VM sleeps once no OpenCode agent is running and nothing has used it for the idle time.",
       "Each QR code works once, for 10 minutes. The QR code appears only when VM Bridge has an address other devices can reach.",
       "New password, in the same dialog, signs out every OpenCode client of that project.",

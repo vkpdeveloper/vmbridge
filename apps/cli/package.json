@@ -4,6 +4,7 @@
   "type": "module",
   "bin": { "vmbridge": "./src/index.ts" },
   "dependencies": {
+    "@vmbridge/contracts": "workspace:*",
     "@vmbridge/server": "workspace:*"
   }
 }

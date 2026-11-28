@@ -22,7 +22,7 @@ const alive = (pid: number) => {
  */
 function isVmBridge(pid: number) {
   const command = Bun.spawnSync(["ps", "-p", String(pid), "-o", "comm="], { env: childEnv() }).stdout.toString().trim();
-  return /^(vmbridge|bun)/.test(basename(command));
+  return /^(vmbridge|vb|bun)/.test(basename(command));
 }
 
 /**

@@ -1,0 +1,229 @@
+// `vmbridge opencode`: from a local repository to OpenCode running in a fresh worktree on one of its project's VMs.
+import type { OpenCodeLaunchEvent, OpenCodeWorktrees } from "@vmbridge/contracts";
+import { newToken } from "../auth/tokens.ts";
+import { message, WorktreeGone } from "../fleet.ts";
+import { fetchPullRequest } from "../github.ts";
+import { providers } from "../providers/index.ts";
+import type { Store } from "../store.ts";
+import type { Traffic } from "../traffic.ts";
+import { NoOpenCodeKey, type OpenCodeServer } from "../vm/opencode.ts";
+import type { Clones } from "./clones.ts";
+import type { Hub } from "./hub.ts";
+import { githubName } from "./repos.ts";
+import { openCodePrefix } from "./opencode.ts";
+
+/** A branch as the clone flow takes one. */
+const branchName = (branch: string) => /^[\w./-]+$/.test(branch) && !branch.startsWith("-") && !branch.includes("..");
+
+type Deps = { store: Store; hub: Hub; clones: Clones; traffic: Traffic; hasKey: () => boolean; githubToken: () => string | undefined };
+
+/**
+ * `/api/vmbridge/opencode`. POST starts OpenCode in a new worktree, or one made before (see `launch`). DELETE, sent when
+ * the terminal app closes, removes that worktree unless it holds work. GET lists a repository's worktrees.
+ */
+export function openCodeLauncher(deps: Deps) {
+  return async (request: Request): Promise<Response> => {
+    if (request.method === "GET") return await list(deps, request);
+    if (request.method === "POST") return launch(deps, request);
+    if (request.method === "DELETE") return finish(deps, request);
+    return new Response("Method Not Allowed", { status: 405 });
+  };
+}
+
+/**
+ * Finds or adds the project for `remote`, places it on a VM as a new thread would be, makes a worktree there and starts
+ * OpenCode. With `resume`, it opens that worktree again instead. The answer is a stream of JSON lines, one per step, so
+ * the terminal shows each as it happens. The last line has the OpenCode address under this server and its password, or
+ * the error.
+ */
+async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Request) {
+  const body = (await request.json().catch(() => null)) as { remote?: unknown; branch?: unknown; resume?: unknown } | null;
+  const remote = typeof body?.remote === "string" ? body.remote : "";
+  const branch = typeof body?.branch === "string" && branchName(body.branch) ? body.branch : null;
+  const resume = typeof body?.resume === "string" ? body.resume : null;
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: OpenCodeLaunchEvent) => {
+        try {
+          controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+        } catch {
+          // The terminal went away. The steps already running finish, and the worktree stays for next time.
+        }
+      };
+      const step = (text: string) => send({ step: text });
+      const detail = (text: string) => send({ detail: text });
+      const started = performance.now();
+      let vmId: string | undefined;
+      try {
+        if (!hasKey()) throw new NoOpenCodeKey();
+        const project = clones.add(remote);
+        let password = store.openCodePassword(project.id);
+        if (!password) {
+          password = newToken();
+          store.setOpenCodePassword(project.id, password);
+        }
+        let worktree: { name: string; path: string; branch: string; base: string | null };
+        let sessionId: string | null = null;
+        // OpenCode starts beside the worktree being made. What it does shows once its step does, not under the worktree's.
+        let opening: Promise<OpenCodeServer> | undefined;
+        let openingDetail: string | null = null;
+        let showOpening = false;
+        const startOpenCode = (vmId: string) => {
+          opening = hub.fleet.opencode(vmId, (text) => {
+            openingDetail = text;
+            if (showOpening) detail(text);
+          });
+          opening.catch(() => {});
+          return opening;
+        };
+        if (resume) {
+          // Where VM Bridge noted it, so only that VM wakes. Worktrees from before it noted them are looked for.
+          const noted = store.openCodeWorktrees(project.id).find((row) => row.name === resume);
+          step(`Opening ${noted?.branch ?? resume}`);
+          // Where it was noted, OpenCode starts as soon as the VM is ready, and answers whether the worktree is there.
+          const openCode = noted ? (id: string) => opening ?? startOpenCode(id) : undefined;
+          const found = await hub.fleet.findWorktree(project.id, resume, step, detail, noted?.vmId, openCode).catch((error: unknown) => {
+            // Only when it is gone: one git could not open is still there, with its work.
+            if (noted && error instanceof WorktreeGone) store.removeOpenCodeWorktree(project.id, resume);
+            throw error;
+          });
+          vmId = found.vmId;
+          // OpenCode's answer has no branch, so it is the one noted until git's comes in.
+          const foundBranch = found.branch ?? noted?.branch ?? "HEAD";
+          worktree = { ...found, name: resume, branch: foundBranch, base: noted?.base ?? null };
+          sessionId = noted?.sessionId ?? null;
+          if (noted) {
+            store.touchOpenCodeWorktree(project.id, resume);
+            if (found.branch) store.setOpenCodeWorktreeBranch(project.id, resume, found.branch);
+          } else store.addOpenCodeWorktree({ projectId: project.id, vmId, name: resume, branch: foundBranch, base: null });
+        } else {
+          step(`Finding a VM for ${project.title}`);
+          const placement = await hub.placeOpenCode(project.id, step, detail);
+          vmId = placement.vmId;
+          if (placement.notice) send({ notice: placement.notice });
+          startOpenCode(vmId);
+          step("Making a worktree");
+          worktree = await hub.fleet.worktree(vmId, project.id, branch);
+          store.addOpenCodeWorktree({ projectId: project.id, vmId, ...worktree });
+        }
+        step("Starting OpenCode");
+        showOpening = true;
+        if (openingDetail) detail(openingDetail);
+        if (!opening) startOpenCode(vmId);
+        await opening;
+        traffic.record({ kind: "system", operation: `OpenCode worktree for ${project.title}`, vmId, status: "ok", durationMs: Math.round(performance.now() - started) });
+        const vm = store.vm(vmId);
+        const github = githubName(project.url);
+        send({
+          ready: {
+            path: `${openCodePrefix}${project.id}/w/${vmId}/${worktree.name}`,
+            password,
+            projectId: project.id,
+            project: project.title,
+            repositoryUrl: github ? `https://github.com/${github}` : null,
+            vmId,
+            vm: vm?.name ?? vmId,
+            provider: vm ? providers[vm.provider].label : "",
+            name: worktree.name,
+            directory: worktree.path,
+            branch: worktree.branch,
+            base: worktree.base,
+            sessionId,
+          },
+        });
+      } catch (error) {
+        traffic.record({ kind: "system", operation: `OpenCode worktree: ${message(error)}`, vmId, status: "error" });
+        send({ error: message(error) });
+      }
+      controller.close();
+    },
+  });
+  return new Response(stream, { headers: { "content-type": "application/x-ndjson", "cache-control": "no-store" } });
+}
+
+/**
+ * Removes a worktree `launch` made, once the terminal app closes, unless it holds work or an agent may be using it. It
+ * answers at once and removes in the background, so the terminal does not wait on the VM. On Cloudflare the Durable
+ * Object keeps running after it answers, as it does for VM Bridge's other background work.
+ */
+async function finish({ store, hub, traffic }: Deps, request: Request) {
+  const body = (await request.json().catch(() => null)) as { projectId?: unknown; vmId?: unknown; name?: unknown } | null;
+  const { projectId, vmId, name } = body ?? {};
+  if (typeof projectId !== "string" || typeof vmId !== "string" || typeof name !== "string" || !store.project(projectId)) {
+    return Response.json({ error: "No such worktree." }, { status: 404 });
+  }
+  void hub.fleet.removeWorktree(vmId, projectId, name).then(
+    ({ removed, branch }) => {
+      if (removed) store.removeOpenCodeWorktree(projectId, name);
+      else {
+        store.touchOpenCodeWorktree(projectId, name);
+        if (branch) store.setOpenCodeWorktreeBranch(projectId, name, branch);
+      }
+      traffic.record({ kind: "system", operation: `OpenCode worktree ${name} ${removed ? "removed" : "kept"}`, vmId, status: "ok" });
+    },
+    (error: unknown) => traffic.record({ kind: "system", operation: `Removing OpenCode worktree ${name}: ${message(error)}`, vmId, status: "error" }),
+  );
+  return new Response(null, { status: 202 });
+}
+
+/**
+ * Brings what VM Bridge noted of a project's worktrees in line with its awake VMs: every worktree on one is listed, even
+ * one VM Bridge never noted or forgot, and one whose folder is gone is not. Sleeping VMs are not woken for it.
+ */
+export async function syncWorktrees(store: Store, hub: Pick<Hub, "fleet">, projectId: string) {
+  const started = Date.now();
+  const project = store.project(projectId);
+  if (!project) return;
+  await Promise.all(
+    project.vms.map(async ({ vmId }) => {
+      const found = await hub.fleet.worktreesOn(vmId, projectId).catch(() => null);
+      if (!found) return;
+      const noted = store.openCodeWorktrees(projectId);
+      for (const worktree of found) {
+        const row = noted.find((entry) => entry.name === worktree.name);
+        if (!row) store.addOpenCodeWorktree({ projectId, vmId, name: worktree.name, branch: worktree.branch, base: null }, worktree.changedAt);
+        else if (row.vmId === vmId && row.branch !== worktree.branch) store.setOpenCodeWorktreeBranch(projectId, worktree.name, worktree.branch);
+      }
+      // Not one made while this looked: it was not there to be found yet.
+      for (const row of noted) {
+        if (row.vmId === vmId && row.createdAt < started && !found.some((worktree) => worktree.name === row.name)) store.removeOpenCodeWorktree(projectId, row.name);
+      }
+    }),
+  );
+}
+
+/**
+ * The worktrees of the repository at `?remote=` that are on its VMs: from what VM Bridge noted, checked against the VMs
+ * that are awake, waking none. Each comes with its branch's pull request when the repository is on GitHub.
+ */
+async function list({ store, hub, clones, githubToken }: Deps, request: Request) {
+  const remote = new URL(request.url).searchParams.get("remote") ?? "";
+  let project: ReturnType<Clones["find"]> = null;
+  try {
+    project = clones.find(remote);
+  } catch {
+    // Not a remote VM Bridge can clone, so it has no project.
+  }
+  if (project) await syncWorktrees(store, hub, project.id);
+  const github = project ? githubName(project.url) : undefined;
+  const token = githubToken();
+  const answer: OpenCodeWorktrees = {
+    project: project?.title ?? null,
+    worktrees: await Promise.all((project ? store.openCodeWorktrees(project.id) : []).map(async (row) => {
+      const vm = store.vm(row.vmId);
+      return {
+        name: row.name,
+        branch: row.branch,
+        base: row.base,
+        vm: vm?.name ?? row.vmId,
+        asleep: vm?.state !== "ready" && vm?.state !== "busy",
+        pullRequest: github && row.branch !== "HEAD" ? await fetchPullRequest(github, row.branch, token) : null,
+        lastPrompt: row.lastPrompt,
+        createdAt: new Date(row.createdAt).toISOString(),
+        lastUsedAt: new Date(row.lastUsedAt).toISOString(),
+      };
+    })),
+  };
+  return Response.json(answer);
+}

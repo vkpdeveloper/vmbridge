@@ -7,9 +7,11 @@ import { DashboardAuth } from "./auth/dashboard.ts";
 import type { Passwords } from "./auth/password.ts";
 import { type Encryption, openEncryption, type KeySource } from "./encryption.ts";
 import { Fleet } from "./fleet.ts";
+import { fetchPullRequestStatus } from "./github.ts";
 import { Clones } from "./gateway/clones.ts";
 import { FileTrees } from "./gateway/files.ts";
 import { T3Gateway } from "./gateway/http.ts";
+import { openCodeLauncher } from "./gateway/opencode-launch.ts";
 import { OpenCodeGateway } from "./gateway/opencode.ts";
 import { Hub } from "./gateway/hub.ts";
 import { RemoteBranches } from "./gateway/repos.ts";
@@ -21,6 +23,7 @@ import type { Sql } from "./sql.ts";
 import { Store } from "./store.ts";
 import { Traffic } from "./traffic.ts";
 import { Usage } from "./usage.ts";
+import { OpenCodeSessions } from "./vm/opencode-sessions.ts";
 import { Stats } from "./vm/stats.ts";
 import { WatchLinks } from "./watch/links.ts";
 import { Watch } from "./watch/watch.ts";
@@ -60,6 +63,7 @@ export function openBridge(runtime: BridgeRuntime) {
     void fleet.shareSkills();
   });
   const stats = new Stats(fleet);
+  const openCodeSessions = new OpenCodeSessions(fleet);
   const usage = new Usage(store, () => fleet.connected());
   for (const event of ["changed", "awake", "offline"] as const) fleet.on(event, () => usage.sync());
   const branches = new RemoteBranches(() => secrets.get("github.token"), runtime.resolve);
@@ -78,8 +82,9 @@ export function openBridge(runtime: BridgeRuntime) {
     if (store.vm(vmId)?.state === "sleeping") void files.refresh(store.projects().filter((project) => project.vms.some((entry) => entry.vmId === vmId)));
   });
   const rpc = new Rpc(hub, clones, branches, traffic, () => secrets.has("github.token"), files);
-  const gateway = new T3Gateway(hub, rpc, clients);
-  const opencode = new OpenCodeGateway(store, fleet, traffic, () => Boolean(settings.get("agentProfiles").opencode));
+  const hasOpenCodeKey = () => Boolean(settings.get("agentProfiles").opencode);
+  const gateway = new T3Gateway(hub, rpc, clients, openCodeLauncher({ store, hub, clones, traffic, hasKey: hasOpenCodeKey, githubToken: () => secrets.get("github.token") }));
+  const opencode = new OpenCodeGateway(store, fleet, traffic, hasOpenCodeKey, (repository, branch) => fetchPullRequestStatus(repository, branch, secrets.get("github.token")));
   const auth = new DashboardAuth(db, secrets, runtime.passwords);
   const watch = new Watch({
     links: new WatchLinks(db, encryption),
@@ -90,7 +95,7 @@ export function openBridge(runtime: BridgeRuntime) {
     addresses: runtime.addresses,
     page: runtime.watchPage,
   });
-  return { settings, encryption, key, secrets, store, traffic, agents, skills, fleet, stats, usage, budget, hub, gateway, opencode, clients, auth, watch };
+  return { settings, encryption, key, secrets, store, traffic, agents, skills, fleet, stats, openCodeSessions, usage, budget, hub, gateway, opencode, clients, auth, watch };
 }
 
 export type Bridge = ReturnType<typeof openBridge>;

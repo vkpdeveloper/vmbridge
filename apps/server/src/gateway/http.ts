@@ -37,7 +37,8 @@ const json = (value: unknown, status = 200) => Response.json(value, { status });
 const notFound = () => new Response("Not Found", { status: 404 });
 const unauthenticated = () => json({ code: "auth_invalid", reason: "invalid_credential", traceId: crypto.randomUUID() }, 401);
 
-const tokenExchange = {
+/** The RFC 8693 exchange that trades a pairing link's token for a bearer token. */
+export const tokenExchange = {
   grant: "urn:ietf:params:oauth:grant-type:token-exchange",
   subject: "urn:t3:params:oauth:token-type:environment-bootstrap",
   requested: "urn:ietf:params:oauth:token-type:access_token",
@@ -104,6 +105,8 @@ export class T3Gateway {
     private readonly hub: Hub,
     private readonly rpc: Rpc,
     private readonly clients: Clients,
+    /** `vmbridge opencode`, which opens OpenCode in a new worktree and removes it after (see opencode-launch.ts). */
+    private readonly openCodeWorktrees?: (request: Request) => Promise<Response>,
   ) {
     this.expiry = setInterval(() => {
       for (const socket of this.sockets) if (!clients.valid(socket.data.clientId)) socket.close(1008, "Session expired");
@@ -246,6 +249,7 @@ export class T3Gateway {
       const { ticket, expiresAt } = this.clients.ticket(client.id, ticketFor[1] === "media" ? "media" : "rpc");
       return json({ ticket, expiresAt: new Date(expiresAt).toISOString() });
     }
+    if (path === "/api/vmbridge/opencode" && this.openCodeWorktrees) return this.openCodeWorktrees(request);
     if (path === "/api/orchestration/shell" && request.method === "GET") return json(this.hub.shell());
     if (path === "/api/projects" && request.method === "GET") {
       const projects = (this.hub.shell().projects ?? []).map((project) => ({ ...project, deletedAt: null }));

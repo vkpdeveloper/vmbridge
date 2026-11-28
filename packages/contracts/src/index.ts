@@ -180,10 +180,39 @@ export interface VmSession {
   /** The model's name as its agent lists it, such as "Claude Opus 5.5", or its ID when the agent does not list it. */
   model: string | null;
   agent: SessionAgent | null;
-  status: string;
-  /** A turn is running, queued, or waiting on an approval. */
-  working: boolean;
+  activity: SessionActivity;
   updatedAt: string | null;
+}
+
+/**
+ * What a session is doing, as T3's sidebar tells it: its turn running or `starting`, stopped on an `approval` or the
+ * user's `input`, `waiting` on other work, `failed`, `done`, or `idle` before any turn or after one was stopped.
+ */
+export type SessionState = "working" | "starting" | "approval" | "input" | "waiting" | "failed" | "done" | "idle";
+
+export interface SessionActivity {
+  state: SessionState;
+  /** Ms since the epoch: when the running turn started, or the last one finished. Null when unknown. */
+  since: number | null;
+}
+
+/** A session in the OpenCode server a VM runs for `vb opencode` and other OpenCode clients. */
+export interface VmOpenCodeSession {
+  id: string;
+  title: string;
+  projectId: string;
+  repository: string;
+  /** The branch its worktree is on, when VM Bridge knows one worth showing. */
+  branch: string | null;
+  /** The provider's ID, which names its models.dev logo, and its name, as OpenCode's catalog has them. */
+  provider: { id: string; name: string } | null;
+  /** The model's name as OpenCode's catalog has it, when the session has a model. */
+  model: string | null;
+  activity: SessionActivity;
+  /** Ms since the epoch. */
+  updatedAt: number;
+  /** Reopens its worktree from a terminal in a clone of the repository. Null for the checkout, which has no worktree to open. */
+  resumeCommand: string | null;
 }
 
 /** Used and total, in bytes. */
@@ -226,6 +255,8 @@ export interface VmInfo {
   sleepsAt: number | null;
   projects: string[];
   sessions: VmSession[];
+  /** From the last time the VM's OpenCode answered, which stays while the VM sleeps. */
+  openCodeSessions: VmOpenCodeSession[];
   t3Version: string | null;
   /** T3 on the VM has not started with the current sign-ins and environment variables yet. */
   updatePending: boolean;
@@ -692,6 +723,87 @@ export interface OpenCodeConnection {
    * addresses without the project's path. Null when only this machine can reach VM Bridge.
    */
   pairing: { code: string; urls: string[]; expiresInSeconds: number } | null;
+}
+
+/** One line of `POST /api/vmbridge/opencode`'s answer, for `vmbridge opencode`: a step, a warning, then ready or an error. */
+export type OpenCodeLaunchEvent =
+  | { step: string }
+  /** What the current step is doing now, such as which part of a wake. The next step replaces it. */
+  | { detail: string }
+  | { notice: string }
+  | { error: string }
+  | {
+      ready: {
+        /** The OpenCode address, under the VM Bridge address the request went to. */
+        path: string;
+        password: string;
+        projectId: string;
+        project: string;
+        /** The repository's page, when it is on GitHub. */
+        repositoryUrl: string | null;
+        vmId: string;
+        vm: string;
+        /** The VM's provider, as people know it, such as "Boat". */
+        provider: string;
+        /** The worktree's name, which `DELETE /api/vmbridge/opencode` takes with the two ids to remove it. */
+        name: string;
+        /** The worktree on the VM. */
+        directory: string;
+        branch: string;
+        /** The branch the worktree started from. */
+        base: string | null;
+        /** The OpenCode session last prompted in it, when it was opened again and has one. */
+        sessionId: string | null;
+      };
+    };
+
+/** A pull request on GitHub, by the state it shows there. */
+export interface PullRequest {
+  number: number;
+  url: string;
+  state: "open" | "draft" | "merged" | "closed";
+}
+
+/** A pull request with its last commit's checks and its review, both null when it is not open or VM Bridge has no GitHub token. */
+export interface PullRequestStatus extends PullRequest {
+  checks: "passing" | "failing" | "running" | null;
+  review: "approved" | "changes requested" | "review required" | null;
+}
+
+/** `GET <worktree address>/vmbridge/status`, for `vmbridge opencode`'s sidebar. Asking wakes no VM. */
+export interface OpenCodeWorktreeStatus {
+  /** From git on the VM while it is awake, else the branch VM Bridge last noted. */
+  branch: string | null;
+  pullRequest: PullRequestStatus | null;
+  vm: VmState | null;
+  /** How far the branch is from origin's copy of the branch it started from, while the VM is awake. */
+  sync: { base: string; ahead: number; behind: number } | null;
+  /** Ports that programs started in the worktree listen on, relayed at `<worktree address>/vmbridge/port/<port>/`. */
+  ports: number[];
+}
+
+/** A worktree `vmbridge opencode resume` can open again, as `GET /api/vmbridge/opencode?remote=` lists them. */
+export interface OpenCodeWorktree {
+  name: string;
+  /** The branch it is on, as its VM last said. It starts as `opencode/<name>`, and an agent may switch it. */
+  branch: string;
+  base: string | null;
+  vm: string;
+  /** Whether its VM sleeps, so opening it wakes the VM first. */
+  asleep: boolean;
+  /** The branch's pull request on GitHub, when it has one and VM Bridge could ask. */
+  pullRequest: PullRequest | null;
+  /** The start of the last prompt in it. */
+  lastPrompt: string | null;
+  /** ISO times. */
+  createdAt: string;
+  lastUsedAt: string;
+}
+
+/** `GET /api/vmbridge/opencode?remote=`: the repository's project and its worktrees, last used first. */
+export interface OpenCodeWorktrees {
+  project: string | null;
+  worktrees: OpenCodeWorktree[];
 }
 
 export interface ApiError {

@@ -332,6 +332,9 @@ bun run compile        # dist/vmbridge
 
             <Section id="opencode" title={copy.opencode.title}>
               <p>{copy.opencode.body}</p>
+              <Command text={copy.opencode.run} />
+              <List items={[...copy.opencode.runNotes]} />
+              <p>{copy.opencode.connect}</p>
               <ol className="list-decimal space-y-2 pl-5">
                 {copy.opencode.steps.map((step) => (
                   <li key={step}>{step}</li>

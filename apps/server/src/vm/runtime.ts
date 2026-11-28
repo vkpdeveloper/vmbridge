@@ -158,6 +158,20 @@ function gitConfig(github: VmCredentials["github"]) {
 export const setupStampPath = `${root}/setup-stamp`;
 
 /**
+ * OpenCode's clients speak its 2.x API, which npm ships as @opencode/cli. npm's opencode-ai is the 1.x line, which
+ * T3's own OpenCode agent keeps using, so this one gets its own folder.
+ */
+export const openCodeCliVersion = "2.4.2";
+export const openCodeDir = `${root}/opencode`;
+export const openCodeCli = `${openCodeDir}/cli/bin/opencode`;
+/**
+ * Installs the CLI unless the VM has this version. Setup starts it in the background and OpenCode's start runs it
+ * again, so it holds a lock: a start waits for an install already running instead of racing it. Its own npm cache keeps
+ * it from waiting on the cache lock of setup's install running beside it.
+ */
+export const installOpenCodeCli = `(command -v flock >/dev/null && flock 9; ${openCodeCli} --version 2>/dev/null | grep -qxF "opencode v${openCodeCliVersion}" || npm install -g --prefix ${openCodeDir}/cli --cache ${openCodeDir}/npm-cache --no-audit --no-fund --loglevel=error @opencode/cli@${openCodeCliVersion} >&2) 9>${openCodeDir}/cli.lock`;
+
+/**
  * Idempotent: installs Node when missing, the exact `t3` version, the agent CLIs, gh, and Git access. Connecting skips
  * it while the VM's stamp matches, so changing this text makes every VM run it once more.
  */
@@ -201,10 +215,17 @@ install_gh() {
     fetch "https://github.com/cli/cli/releases/download/v$ghversion/gh_\${ghversion}_linux_$gharch.tar.gz" | tar -xz -C "$root/gh.new" --strip-components=1 &&
     rm -rf "$root/gh" && mv "$root/gh.new" "$root/gh"
 }
+# Beside the npm install below.
 if ! "$root/gh/bin/gh" --version 2>/dev/null | grep -Fq "version $ghversion "; then
-  install_gh || { rm -rf "$root/gh.new"; echo "Could not install the GitHub CLI $ghversion. Setup goes on without it." >&2; }
+  { install_gh || { rm -rf "$root/gh.new"; echo "Could not install the GitHub CLI $ghversion. Setup goes on without it." >&2; }; } &
+  gh_pid=$!
 fi
 mkdir -p "$root/gh-config"
+
+# OpenCode's CLI, for \`vb opencode\`, in the background: setup does not wait for it, and OpenCode's start waits only
+# if it is still installing then.
+mkdir -p ${openCodeDir}
+setsid nohup bash -c ${quote(installOpenCodeCli)} > ${openCodeDir}/install.log 2>&1 < /dev/null &
 
 # Images usually have Node and the agent CLIs already: install only what is missing, in one npm run.
 missing=()
@@ -216,6 +237,7 @@ command -v claude >/dev/null || missing+=(@anthropic-ai/claude-code)
 mkdir -p "$root/codex" "$root/claude"
 # The npm launcher downloads the T3 runtime on first use. Do it now rather than during a request.
 t3 --version >/dev/null
+[ -z "\${gh_pid:-}" ] || wait "$gh_pid"
 
 git config --global --get-all include.path | grep -Fxq "$root/gitconfig" || git config --global --add include.path "$root/gitconfig"
 
@@ -335,11 +357,33 @@ export const writes = (files: Record<string, string>) =>
     .join("\n");
 
 /**
+ * Providers whose SDK sends stdin through several more requests than a file write and a plain command take together:
+ * Daytona about 1.7s a program against 0.5s. On E2B the file is slower than stdin.
+ */
+const programFileProviders = new Set(["daytona"]);
+
+/**
+ * The program goes up as a file only the VM's user can read, which becomes the command's stdin and is removed before
+ * anything in it runs. A file left by a command that never started is removed here.
+ */
+async function runFromFile(box: Box, program: string, timeoutMs: number) {
+  const path = `/tmp/.vmbridge-program-${crypto.randomUUID()}`;
+  await box.files.write(path, program, { mode: 0o600 });
+  try {
+    return await box.run(`(rm -f ${path}; exec bash -s) < ${path}`, { timeoutMs });
+  } catch (error) {
+    await box.run(`rm -f ${path}`).catch(() => {});
+    throw error;
+  }
+}
+
+/**
  * Runs a bash program in the VM in one exec. It goes on stdin, so the files it writes never reach a command line. Bash
  * reads `main` whole before running it, and it runs without stdin, so nothing it starts can read the rest of the program.
  */
 export async function runProgram(box: Box, body: string, what: string, timeoutMs = 120_000) {
-  const result = await box.run("bash -s", { stdin: `set -euo pipefail\nmain() {\n${body}\n}\nmain </dev/null\n`, timeoutMs });
+  const program = `set -euo pipefail\nmain() {\n${body}\n}\nmain </dev/null\n`;
+  const result = programFileProviders.has(box.provider) ? await runFromFile(box, program, timeoutMs) : await box.run("bash -s", { stdin: program, timeoutMs });
   // Only stderr's tail: setup output is install noise, and stdout can hold the VM's Codex sign-in.
   if (!result.ok) throw new Error(`${what} failed (exit ${result.exitCode}): ${result.stderr.slice(-600)}`);
   return result.stdout;

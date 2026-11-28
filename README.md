@@ -261,7 +261,12 @@ vmbridge update [--check]                         Install the latest release and
 vmbridge service install [--host] [--port]        Run in the background at login
 vmbridge service uninstall                        Remove the background service
 vmbridge password                                 Set a new dashboard password
+vmbridge opencode [--branch <name>]               Open OpenCode on a VM, in a new worktree of this repository
+vmbridge opencode resume [<id>]                   Open a worktree again, picked from a list
+vmbridge login <pairing link>                     Sign this terminal in to VM Bridge on another computer
 ```
+
+`vb` is a short name for `vmbridge`.
 
 Starting VM Bridge while another one is running stops the old one first, so a restart never leaves
 old code serving. The background service is the exception: `vmbridge` then shows its addresses and
@@ -277,6 +282,37 @@ a reverse proxy's domain, list it in `VMBRIDGE_ALLOWED_HOSTS`, separated by comm
 on any name.
 
 Sizes, sleep behaviour and notes for each provider: [docs/PROVIDERS.md](docs/PROVIDERS.md).
+
+## OpenCode
+
+Run `vb opencode` inside a repository. VM Bridge finds or adds its project, picks a VM the way it
+does for a new thread (waking one, or making one when the others are full), clones the repository
+there if needed, makes a worktree on a new `opencode/<id>` branch and opens OpenCode in it. Each step
+shows as it happens. The worktree starts from your current branch when origin has it, otherwise from
+the default branch. Once it opens, OpenCode shows a toast naming the VM it runs on, and its sidebar
+shows the repository, the branch the worktree is on now and how far it is from the branch it started
+from, that branch's pull request once it has one with its checks and review, and the VM, noting when
+it is asleep. Clicking the pull request, its checks or the repository opens it on GitHub. A dev server
+an agent starts in the worktree shows up there too, at a `localhost` address on your computer that
+VM Bridge relays to the VM, so its page and live reload work as if it ran locally.
+
+The dashboard lists each VM's OpenCode sessions beside its T3 threads, with the model, the repository
+and branch, and whether the agent is working. Clicking one copies the `vb opencode resume` command
+that reopens its worktree.
+
+It needs an OpenCode API key in **Accounts** and OpenCode 2 on your computer
+(`npm install -g @opencode/cli`). On the computer VM Bridge runs on, the command signs itself in; on
+another, run `vb login` once with a pairing link from **Devices**. When you close OpenCode, the
+worktree is removed unless it has changes or commits that are not pushed.
+
+`vb opencode resume` lists the repository's worktrees still on its VMs, last used first. Each shows
+the branch it is on, that branch's pull request when GitHub has one, its VM and whether that VM is
+running, and the start of the last prompt. VM Bridge keeps that list itself and checks it against the
+VMs that are awake, so every worktree on a running VM shows, and no VM is woken for it. Pick one with the arrow keys and Enter: VM Bridge wakes that VM and
+OpenCode opens in the session you last prompted there. `vb opencode resume <id>` skips the list.
+
+To connect an OpenCode app yourself, choose **Connect OpenCode** next to a repository on the
+dashboard.
 
 ## License
 

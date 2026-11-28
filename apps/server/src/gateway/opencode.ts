@@ -1,18 +1,25 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import type { OpenCodeWorktreeStatus, PullRequestStatus } from "@vmbridge/contracts";
 import { BudgetReached } from "../budget.ts";
 import { message, NoProvider, type Fleet } from "../fleet.ts";
+import { providers } from "../providers/index.ts";
 import { primaryVm, type Store } from "../store.ts";
 import type { Traffic } from "../traffic.ts";
-import { cliVersion, NoOpenCodeKey, OpenCodeUnreachable, type OpenCodeServer } from "../vm/opencode.ts";
+import { previewTarget } from "../vm/backend.ts";
+import { openCodeCliVersion } from "../vm/runtime.ts";
+import { NoOpenCodeKey, OpenCodeUnreachable, worktreeName, worktreePath, type OpenCodeServer } from "../vm/opencode.ts";
 import type { Viewer, WatchUpgrade } from "../watch/watch.ts";
 import { previewRelay } from "./preview.ts";
+import { githubName } from "./repos.ts";
 
 /**
  * Each project's OpenCode address is VM Bridge's own with this and the project's ID after it. OpenCode's clients keep
  * the path of the address they are given, except `opencode api`, which asks from the root: those requests are known by
- * their password instead.
+ * their password instead. `vmbridge opencode` adds `/w/<vmId>/<worktree>`, for a worktree on one of the project's VMs.
  */
 export const openCodePrefix = "/opencode/";
+const worktreeAddress = /^\/w\/([\w-]{1,64})\/([^/]+)(\/.*)?$/;
+const locationKey = "location[directory]";
 
 const retryAfterSeconds = 10;
 /**
@@ -23,11 +30,33 @@ const retryAfterSeconds = 10;
 const infoWaitMs = 3_000;
 const wakingInfo = () =>
   Response.json(
-    { version: cliVersion, pid: 0, hostname: "VM Bridge", urls: [], paths: { tmp: "/tmp/opencode" }, capabilities: { persistentPty: true } },
+    { version: openCodeCliVersion, pid: 0, hostname: "VM Bridge", urls: [], paths: { tmp: "/tmp/opencode" }, capabilities: { persistentPty: true } },
     { headers: { "cache-control": "no-store" } },
   );
 /** Typing in a terminal counts as activity, but the VM's row is written at most this often for it. */
 const touchEveryMs = 10_000;
+/** A prompt in an OpenCode session, which makes it the one `vmbridge opencode resume` opens in its worktree. */
+const promptPath = /^\/api\/session\/([\w-]{1,128})\/(?:prompt|command|shell)$/;
+const promptShown = 120;
+
+/** The first text in a prompt's body, however OpenCode nests it, cut short. */
+export function promptText(body: unknown): string | null {
+  const queue: unknown[] = [body];
+  while (queue.length > 0) {
+    const value = queue.shift();
+    if (Array.isArray(value)) queue.push(...value);
+    else if (value && typeof value === "object") {
+      for (const [key, inner] of Object.entries(value)) {
+        if ((key === "text" || key === "command") && typeof inner === "string" && inner.trim()) {
+          const text = inner.trim().replace(/\s+/g, " ");
+          return text.length > promptShown ? `${text.slice(0, promptShown - 1)}…` : text;
+        }
+        queue.push(inner);
+      }
+    }
+  }
+  return null;
+}
 
 /** OpenCode's WebSockets that take a one-use ticket from an earlier request, as browsers cannot send a password. */
 const ticketed = [
@@ -46,6 +75,16 @@ const connectPath = /^\/auth\/connect\/([^/]+)$/;
 
 /** Pairing on the VM would hand out a credential for its own server, which only VM Bridge holds. */
 const blocked = (path: string) => path === "/api/pair" || path.startsWith("/api/pair/") || path.startsWith("/auth/");
+
+/** VM Bridge answers this itself, at a worktree's address, for `vmbridge opencode`'s sidebar. */
+const statusPath = "/vmbridge/status";
+/**
+ * A port on a worktree's VM, at the worktree's address, and the path to ask there. VM Bridge relays it through the
+ * provider's preview of that port, holding the preview's credentials, so the sidebar can open a dev server here.
+ */
+const devPortPath = /^\/vmbridge\/port\/([1-9]\d{0,4})(?=\/|$)/;
+/** The WebSocket subprotocols a relayed dev server's client asked for, such as Vite's `vite-hmr`, sent on to the VM. */
+const protocolsHeader = "x-vmbridge-protocols";
 
 /**
  * Not sent on to the VM: credentials are VM Bridge's to check and the VM's to get, hop-by-hop headers belong to this
@@ -125,6 +164,46 @@ function preflight(request: Request) {
   });
 }
 
+/**
+ * OpenCode's clients want `server.connected` first, within 2 seconds, and reconnect after 45 seconds without a byte.
+ * Reconnecting drops everything they loaded, and loading it again would wake a sleeping VM.
+ */
+const heartbeatMs = 15_000;
+/** How long a request waits for the event streams held for its VM to reach OpenCode, so they miss none of its events. */
+const attachWaitMs = 5_000;
+
+const eventFrame = (event: object) => `data: ${JSON.stringify({ id: `evt_${randomBytes(12).toString("hex")}`, ...event })}\n\n`;
+
+/**
+ * OpenCode's terminal app shows a `tui.toast.show` event as a toast when it names the folder the app works in. One goes
+ * into each event stream once it reaches OpenCode, so the app says which VM it runs on.
+ */
+const toastFrame = (directory: string, message: string) =>
+  eventFrame({ created: Date.now(), type: "tui.toast.show", location: { directory }, data: { title: "VM Bridge", message, variant: "info", duration: 5_000 } });
+
+/** An event stream's frames, each a whole event, so nothing VM Bridge adds can land inside one. */
+async function* frames(body: ReadableStream<Uint8Array>) {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for await (const chunk of body) {
+    buffer += decoder.decode(chunk, { stream: true }).replaceAll("\r\n", "\n");
+    for (let end = buffer.indexOf("\n\n"); end >= 0; end = buffer.indexOf("\n\n")) {
+      yield buffer.slice(0, end + 2);
+      buffer = buffer.slice(end + 2);
+    }
+  }
+}
+
+/** An OpenCode event stream VM Bridge holds for a client, across its VM's sleeps. */
+interface HeldStream {
+  projectId: string;
+  vmId: string;
+  attached(): boolean;
+  /** Resolves once the stream gets the VM's events, or has closed because it could not. */
+  attach(server: OpenCodeServer): Promise<void>;
+  close(): void;
+}
+
 /** Resolves to null when `promise` takes longer than `ms`. It keeps running, and a late failure is not unhandled. */
 async function within<T>(promise: Promise<T>, ms: number): Promise<T | null> {
   promise.catch(() => {});
@@ -155,7 +234,10 @@ export class OpenCodeGateway {
   /** Aborted as a VM goes offline, ending every request and event stream open to its OpenCode. */
   private readonly ends = new Map<string, AbortController>();
   private readonly relays = new Set<{ vmId: string; end: (code: number, reason: string) => void }>();
+  private readonly held = new Set<HeldStream>();
   private readonly touched = new Map<string, number>();
+  /** When each worktree's use was last noted, by `<project>/<name>`. */
+  private readonly worktreeUses = new Map<string, number>();
   private readonly pairings = new Map<string, { projectId: string; expires: number }>();
 
   constructor(
@@ -164,6 +246,8 @@ export class OpenCodeGateway {
     private readonly traffic: Traffic,
     /** Whether VM Bridge has an OpenCode key to give VMs. OpenCode is not started without one. */
     private readonly hasKey: () => boolean,
+    /** The pull request from a branch of a GitHub repository (`owner/name`), as GitHub answers with VM Bridge's token. */
+    private readonly pullRequest: (repository: string, branch: string) => Promise<PullRequestStatus | null>,
     /**
      * How long a request waits for its VM to wake and OpenCode to start before it is told to try again. OpenCode's
      * clients wait as long as it takes, so this is just under the 100 seconds Cloudflare's tunnel waits for an answer.
@@ -193,6 +277,7 @@ export class OpenCodeGateway {
     const project = this.store.project(projectId);
     const vmId = project && primaryVm(project)?.vmId;
     if (vmId) this.end(vmId, "The password changed");
+    for (const stream of this.held) if (stream.projectId === projectId) stream.close();
     for (const [code, pairing] of this.pairings) if (pairing.projectId === projectId) this.pairings.delete(code);
   }
 
@@ -256,9 +341,13 @@ export class OpenCodeGateway {
     return response;
   }
 
-  /** The project a request names in its path, if any, and the path and query to ask the VM, without the password. */
-  private target(url: URL): { projectId: string | null; path: string } | null {
+  /**
+   * The project a request names in its path, if any, the worktree on one of its VMs, and the path and query to ask the
+   * VM, without the password.
+   */
+  private target(url: URL): { projectId: string | null; worktree: { vmId: string; name: string } | null; path: string } | null {
     let projectId: string | null = null;
+    let worktree = null;
     let path = url.pathname;
     if (path.startsWith(openCodePrefix)) {
       const rest = path.slice(openCodePrefix.length);
@@ -266,11 +355,30 @@ export class OpenCodeGateway {
       projectId = slash < 0 ? rest : rest.slice(0, slash);
       path = slash < 0 ? "/" : rest.slice(slash);
       if (!projectId) return null;
+      const named = worktreeAddress.exec(path);
+      if (named) {
+        if (!worktreeName.test(named[2]!)) return null;
+        worktree = { vmId: named[1]!, name: named[2]! };
+        path = named[3] ?? "/";
+      }
     } else if (!atRoot(path) && !connectPath.test(path)) return null;
     const query = new URLSearchParams(url.search);
     query.delete("auth_token");
     const search = query.toString();
-    return { projectId, path: search ? `${path}?${search}` : path };
+    return { projectId, worktree, path: search ? `${path}?${search}` : path };
+  }
+
+  /**
+   * A worktree address's folder on the VM. OpenCode's terminal app first asks for the folder it runs in on this
+   * computer, which the VM lacks, then for the server's own folder without naming one: that answer is the worktree, so
+   * it works there.
+   */
+  private atWorktree(path: string, method: string, folder: string) {
+    const [pathname, search = ""] = path.split("?") as [string, string?];
+    const query = new URLSearchParams(search);
+    if (method !== "GET" || pathname !== "/api/location" || query.has(locationKey)) return path;
+    query.set(locationKey, folder);
+    return `${pathname}?${query}`;
   }
 
   private accepts(projectId: string, password: string | null) {
@@ -308,15 +416,39 @@ export class OpenCodeGateway {
       seen.refusal = password === null ? "no password" : "wrong password";
       return unauthorized(request);
     }
+    if (signedIn && request.method === "GET" && pathname === statusPath) {
+      return target.worktree ? await this.worktreeStatus(project.id, project.url, target.worktree) : notFound();
+    }
+    const devPort = signedIn ? devPortPath.exec(target.path) : null;
+    if (devPort) {
+      const port = Number(devPort[1]);
+      const rest = target.path.slice(devPort[0].length);
+      return target.worktree && port <= 65_535 ? await this.devServer(request, relay, target.worktree.vmId, port, rest.startsWith("/") ? rest : `/${rest}`) : notFound();
+    }
     if (!this.hasKey()) return problem(503, new NoOpenCodeKey().message);
 
-    // Neither wakes a sleeping VM: a ticket comes from a VM that was awake, and an idle client reopens its event stream
-    // on its own, which would wake the VM again each time it slept.
-    const waking = signedIn && !(request.method === "GET" && pathname === "/api/event");
-    const primary = primaryVm(project)?.vmId;
+    // A worktree's VM, which must be one of the project's, holding its checkout.
+    let folder: string | null = null;
+    if (target.worktree) {
+      const checkout = project.vms.find((entry) => entry.vmId === target.worktree!.vmId)?.checkoutPath;
+      if (!checkout) return notFound();
+      folder = worktreePath(checkout, target.worktree.name);
+    }
+    const known = target.worktree?.vmId ?? primaryVm(project)?.vmId;
+    const events = request.method === "GET" && pathname === "/api/event";
+    if (events && known) {
+      if (target.worktree) this.noteUse(project.id, target.worktree.name, request, pathname);
+      const vm = this.store.vm(known);
+      const directory = folder ?? project.vms.find((entry) => entry.vmId === known)?.checkoutPath;
+      const toast = vm && directory ? toastFrame(directory, `Running on ${vm.name} (${providers[vm.provider].label})`) : null;
+      seen.vmId = known;
+      return this.holdEvents(request, project.id, known, target.path, toast);
+    }
+    // Neither wakes a sleeping VM: a ticket comes from a VM that was awake, and an event stream is held while it sleeps.
+    const waking = signedIn && !events;
     let ready: Promise<{ vmId: string; server: OpenCodeServer }>;
-    if (waking) ready = this.wake(project.id);
-    else if (primary && this.fleet.backend(primary)) ready = this.fleet.opencode(primary).then((server) => ({ vmId: primary, server }));
+    if (waking) ready = target.worktree ? this.wakeVm(target.worktree.vmId) : this.wake(project.id);
+    else if (known && this.fleet.machineReady(known)) ready = this.fleet.opencode(known).then((server) => ({ vmId: known, server }));
     else return tryAgain("This project's VM is asleep. Send a request to wake it.");
     const info = waking && request.method === "GET" && pathname === "/api/info";
     const found = await within(ready, info ? Math.min(infoWaitMs, this.wakeWaitMs) : this.wakeWaitMs);
@@ -328,14 +460,218 @@ export class OpenCodeGateway {
     }
     const { vmId, server } = found;
     seen.vmId = vmId;
-    if (upgrade) return this.socket(request, relay, vmId, server, target.path, seen);
-    return this.forward(request, vmId, server, target.path, seen);
+    if (target.worktree) this.noteUse(project.id, target.worktree.name, request, pathname);
+    const path = folder ? this.atWorktree(target.path, request.method, folder) : target.path;
+    // A prompt that woke the VM makes events the clients' held streams must see, so they reach OpenCode first.
+    const waiting = [...this.held].filter((stream) => stream.vmId === vmId && !stream.attached()).map((stream) => stream.attach(server));
+    if (waiting.length > 0) await within(Promise.all(waiting), attachWaitMs);
+    if (upgrade) {
+      const open = () =>
+        server.socket(path).catch((error: unknown) => {
+          if (error instanceof OpenCodeUnreachable) this.fleet.forgetOpenCode(vmId, server);
+          throw error;
+        });
+      return this.socket(request, relay, vmId, open, seen);
+    }
+    return this.forward(request, vmId, server, path, seen);
+  }
+
+  /**
+   * OpenCode's event stream, which VM Bridge answers itself and holds while the VM sleeps, sending heartbeats as
+   * OpenCode does. A dropped stream would show "Connection lost" and reload everything, which would wake the VM after
+   * each sleep. The stream starts with VM Bridge's own `server.connected` and gets OpenCode's events whenever OpenCode
+   * runs: at once on an awake VM, else once a request wakes it or the VM is awake at a heartbeat.
+   */
+  private holdEvents(request: Request, projectId: string, vmId: string, path: string, toast: string | null): Response {
+    const encoder = new TextEncoder();
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let closed = false;
+    /** Ends the VM's stream while this one gets it. */
+    let upstream: AbortController | null = null;
+    let attaching: Promise<void> | null = null;
+    const send = (text: string) => {
+      if (!closed) controller?.enqueue(encoder.encode(text));
+    };
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      upstream?.abort();
+      this.held.delete(stream);
+      // Already closed when the client went away first.
+      try {
+        controller?.close();
+      } catch {}
+    };
+    const connect = async (server: OpenCodeServer) => {
+      const ending = new AbortController();
+      const slept = this.endSignal(vmId);
+      const signal = AbortSignal.any([request.signal, ending.signal]);
+      const response = await this.forward(new Request(request.url, { headers: request.headers, signal }), vmId, server, path, {}).catch(() => null);
+      const events = response?.ok && response.body ? frames(response.body)[Symbol.asyncIterator]() : null;
+      const first = await events?.next().catch(() => null);
+      // Without OpenCode's events, the client reloads from a stream of its own.
+      if (!events || !first || first.done || closed) return close();
+      upstream = ending;
+      // The client had VM Bridge's own `server.connected`, and a second could make it start over.
+      if (!first.value.includes('"type":"server.connected"')) send(first.value);
+      if (toast) send(toast);
+      toast = null;
+      void (async () => {
+        try {
+          for (let next = await events.next(); !next.done && !closed; next = await events.next()) send(next.value);
+        } catch {}
+        upstream = null;
+        // Past the VM's sleep, the client keeps its stream. Ended any other way, as OpenCode stopping, it may have
+        // missed events, so it reconnects and loads again.
+        if (!slept.aborted) close();
+      })();
+    };
+    const attach = (server: OpenCodeServer) => {
+      if (closed || upstream) return Promise.resolve();
+      attaching ??= connect(server).finally(() => (attaching = null));
+      return attaching;
+    };
+    // Awake without a request from this client, as for T3, it gets OpenCode's events too. Never woken from here.
+    const join = () => {
+      if (!closed && !upstream && !attaching && this.fleet.machineReady(vmId)) void this.fleet.opencode(vmId).then(attach, () => {});
+    };
+    const heartbeat = setInterval(() => {
+      if (upstream || attaching) return;
+      if (!this.store.vm(vmId)) return close();
+      send(": heartbeat\n\n");
+      join();
+    }, heartbeatMs);
+    const stream: HeldStream = { projectId, vmId, attached: () => upstream !== null, attach, close };
+    this.held.add(stream);
+    request.signal.addEventListener("abort", close, { once: true });
+    const body = new ReadableStream<Uint8Array>({
+      start: (started) => {
+        controller = started;
+        send(eventFrame({ type: "server.connected", data: {} }));
+        join();
+      },
+      cancel: close,
+    });
+    const origin = request.headers.get("origin");
+    return new Response(body, {
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache, no-transform",
+        "x-accel-buffering": "no",
+        ...(origin ? { "access-control-allow-origin": origin, vary: "Origin" } : {}),
+      },
+    });
+  }
+
+  /**
+   * A worktree's branch, its pull request, its VM's state, how far it is from its base and the dev servers started in
+   * it, waking no VM. The branch comes from git on the VM when it is awake: OpenCode's own branch info can miss an
+   * agent's switch, as its watcher does not always see one on a Boat VM. Asleep, it is the branch VM Bridge last noted.
+   * What git says is noted too, so `vmbridge opencode resume` lists it.
+   */
+  private async worktreeStatus(projectId: string, url: string, worktree: { vmId: string; name: string }) {
+    const noted = this.store.openCodeWorktrees(projectId).find((row) => row.name === worktree.name);
+    const state = await this.fleet.worktreeState(worktree.vmId, projectId, worktree.name, noted?.base ?? null).catch(() => null);
+    if (state && noted && state.branch !== noted.branch) this.store.setOpenCodeWorktreeBranch(projectId, worktree.name, state.branch);
+    const branch = state?.branch ?? noted?.branch ?? null;
+    const github = githubName(url);
+    const status: OpenCodeWorktreeStatus = {
+      branch,
+      pullRequest: github && branch && branch !== "HEAD" ? await this.pullRequest(github, branch) : null,
+      vm: this.store.vm(worktree.vmId)?.state ?? null,
+      sync: state?.sync ?? null,
+      ports: state?.ports ?? [],
+    };
+    return Response.json(status, { headers: { "cache-control": "no-store" } });
+  }
+
+  /**
+   * Relays a request, or a WebSocket, to `port` on an awake VM through the provider's preview of it. Unlike OpenCode's,
+   * a dev server's cookies pass both ways, as its app may sign in with them, except the preview's own credentials.
+   * It is not recorded as traffic: a dev server's page loads hundreds of files.
+   */
+  private async devServer(request: Request, relay: WatchUpgrade, vmId: string, port: number, path: string) {
+    const preview = await this.fleet.portPreview(vmId, port);
+    if (!preview) return tryAgain("This worktree's VM is asleep. A prompt in OpenCode wakes it.");
+    const target = previewTarget(preview, path);
+    const own = Object.entries(preview.headers ?? {});
+    if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
+      const protocols = request.headers.get(protocolsHeader)?.split(",").map((protocol) => protocol.trim()).filter(Boolean);
+      return this.socket(request, relay, vmId, () => this.fleet.openSocket(target, Object.fromEntries(own), 15_000, protocols), {});
+    }
+    const headers = new Headers(request.headers);
+    // The app's own credentials pass. Basic auth is VM Bridge's password, which the sidebar sends as `auth_token`
+    // instead so an app's own `Authorization` reaches it.
+    const ownAuthorization = headers.get("authorization");
+    for (const name of droppedRequestHeaders) if (name !== "cookie") headers.delete(name);
+    if (ownAuthorization && !/^Basic\s/i.test(ownAuthorization)) headers.set("authorization", ownAuthorization);
+    headers.delete(protocolsHeader);
+    headers.set("accept-encoding", "identity");
+    for (const [name, value] of own) {
+      const theirs = name.toLowerCase() === "cookie" ? headers.get("cookie") : null;
+      headers.set(name, theirs ? `${value}; ${theirs}` : value);
+    }
+    const hasBody = request.method !== "GET" && request.method !== "HEAD" && request.body !== null;
+    const release = this.fleet.lease(vmId);
+    let upstream: Response;
+    try {
+      upstream = await fetch(target, {
+        method: request.method,
+        headers,
+        ...(hasBody ? { body: request.body, duplex: "half" } : {}),
+        redirect: "manual",
+        signal: AbortSignal.any([request.signal, this.endSignal(vmId)]),
+      });
+    } catch {
+      // The error could name the preview's address.
+      return problem(502, `Nothing answered on port ${port} of this worktree's VM.`);
+    } finally {
+      release();
+    }
+    const answer = new Headers(upstream.headers);
+    for (const name of droppedResponseHeaders) answer.delete(name);
+    const previewCookies = new Set(
+      own.filter(([name]) => name.toLowerCase() === "cookie").flatMap(([, value]) => value.split(";").map((cookie) => cookie.split("=")[0]!.trim())),
+    );
+    for (const cookie of upstream.headers.getSetCookie()) if (!previewCookies.has(cookie.split("=")[0]!.trim())) answer.append("set-cookie", cookie);
+    // A redirect to the preview's own address stays here, at the same path.
+    const location = answer.get("location");
+    const to = location ? URL.parse(location, target.href) : null;
+    if (to?.origin === target.origin) answer.set("location", `${to.pathname}${to.search}${to.hash}`);
+    return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers: answer });
+  }
+
+  /**
+   * Notes a use of a `vmbridge opencode` worktree for `vmbridge opencode resume`: when, at most every few seconds, and
+   * the session and text of each prompt.
+   */
+  private noteUse(projectId: string, name: string, request: Request, pathname: string) {
+    const sessionId = request.method === "POST" ? promptPath.exec(pathname)?.[1] : undefined;
+    if (sessionId) {
+      void request
+        .clone()
+        .json()
+        .catch(() => null)
+        .then((body: unknown) => this.store.touchOpenCodeWorktree(projectId, name, { sessionId, text: promptText(body) }));
+      return;
+    }
+    const key = `${projectId}/${name}`;
+    const now = Date.now();
+    if (now - (this.worktreeUses.get(key) ?? 0) < touchEveryMs) return;
+    this.worktreeUses.set(key, now);
+    this.store.touchOpenCodeWorktree(projectId, name);
   }
 
   /** Wakes the project's VM, making it one if it has none, and starts OpenCode there. */
   private async wake(projectId: string) {
-    const vmId = await this.fleet.place(projectId);
-    await this.fleet.ensure(vmId);
+    return this.wakeVm(await this.fleet.place(projectId, undefined, true));
+  }
+
+  /** OpenCode needs the VM prepared, not T3, so this never waits for T3 to start. */
+  private async wakeVm(vmId: string) {
+    await this.fleet.machine(vmId);
     return { vmId, server: await this.fleet.opencode(vmId) };
   }
 
@@ -344,18 +680,22 @@ export class OpenCodeGateway {
     for (const name of droppedRequestHeaders) headers.delete(name);
     headers.set("accept-encoding", "identity");
     const hasBody = request.method !== "GET" && request.method !== "HEAD" && request.body !== null;
+    const signal = AbortSignal.any([request.signal, this.endSignal(vmId)]);
+    // OpenCode's terminal app gives up on an event stream that shows no event within 2 seconds, which starting OpenCode
+    // after a wake takes longer than. Asking for it would only fail, so the VM is not asked.
+    if (signal.aborted) {
+      seen.failure = "The client stopped waiting";
+      return problem(499, "The client stopped waiting.");
+    }
     // Held awake until OpenCode answers. An event stream after that counts only as its requests do.
     const release = this.fleet.lease(vmId);
     let upstream: Response;
     try {
-      upstream = await server.fetch(path, {
-        method: request.method,
-        headers,
-        ...(hasBody ? { body: request.body, duplex: "half" } : {}),
-        signal: AbortSignal.any([request.signal, this.endSignal(vmId)]),
-      });
+      upstream = await server.fetch(path, { method: request.method, headers, ...(hasBody ? { body: request.body, duplex: "half" } : {}), signal });
     } catch (error) {
-      if (error instanceof OpenCodeUnreachable) this.fleet.forgetOpenCode(vmId, server);
+      // A request the client gave up on, or that the VM's sleep ended, says nothing of the server. Forgetting it would
+      // start OpenCode again for the client's next try, which it gives up on too, so the app would never reconnect.
+      if (error instanceof OpenCodeUnreachable && !signal.aborted) this.fleet.forgetOpenCode(vmId, server);
       throw error;
     } finally {
       release();
@@ -373,18 +713,8 @@ export class OpenCodeGateway {
     return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers: answer });
   }
 
-  private socket(request: Request, relay: WatchUpgrade, vmId: string, server: OpenCodeServer, path: string, seen: Seen) {
-    const stream = {
-      vmId,
-      ...previewRelay(
-        () =>
-          server.socket(path).catch((error: unknown) => {
-            if (error instanceof OpenCodeUnreachable) this.fleet.forgetOpenCode(vmId, server);
-            throw error;
-          }),
-        () => this.relays.delete(stream),
-      ),
-    };
+  private socket(request: Request, relay: WatchUpgrade, vmId: string, open: () => Promise<WebSocket>, seen: Seen) {
+    const stream = { vmId, ...previewRelay(open, () => this.relays.delete(stream)) };
     const viewer: Viewer = {
       ...stream.viewer,
       received: (data) => {

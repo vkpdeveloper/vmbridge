@@ -137,6 +137,12 @@ function setup(skillRoots?: string[]) {
   };
   /** Does what a program `prepareVm` or `writeCredentials` sends does to the files, and reports as `prepareVm` reads it. */
   const runProgram = (program: string) => {
+    // OpenCode's stop script.
+    if (program.includes("pkill -KILL")) {
+      if (opencode.failStop) return failed;
+      opencode.stops++;
+      return ok();
+    }
     Object.assign(files, programFiles(program));
     for (const [, paths] of program.matchAll(/^rm -f (.+)$/gm)) for (const path of paths!.split(" ")) delete files[path];
     const incoming = "/workspace/.vmbridge/codex/auth.json.incoming";
@@ -192,11 +198,8 @@ function setup(skillRoots?: string[]) {
       order.push("start");
       startServer();
     },
-    process: (name: string) => ({
-      stop: async () => {
-        if (name === "opencode" && opencode.failStop) throw new Error("The provider did not answer.");
-        if (name === "opencode") opencode.stops++;
-      },
+    process: () => ({
+      stop: async () => {},
       restart: async () => {
         server.restarts++;
         order.push("restart");
@@ -363,6 +366,26 @@ describe("waking", () => {
     expect(store.vm(vm.id)).toMatchObject({ state: "error", error: "T3 sent something unexpected." });
     expect(fleet.backend(vm.id)).toBeUndefined();
     await until(() => t3.sockets.size === 0);
+  });
+
+  test("looking for a running OpenCode never starts one, runs nothing on the VM, and skips VMs it never ran on", async () => {
+    const { fleet, store, calls } = setup();
+    const vm = await fleet.create();
+    await fleet.ensure(vm.id);
+    calls.length = 0;
+    expect(await fleet.runningOpenCode(vm.id)).toBeNull();
+    expect(calls).toEqual([]);
+
+    // After a restart VM Bridge holds no connection: one preview makes it, and later looks reuse it.
+    store.updateVm(vm.id, { opencodePassword: "pw" });
+    expect(await fleet.runningOpenCode(vm.id)).not.toBeNull();
+    expect(await fleet.runningOpenCode(vm.id)).not.toBeNull();
+    expect(calls).toEqual(["preview"]);
+
+    await fleet.sleep(vm.id);
+    calls.length = 0;
+    expect(await fleet.runningOpenCode(vm.id)).toBeNull();
+    expect(calls).toEqual([]);
   });
 
   test("waking a paused VM takes one command in it, and using a connected VM takes none", async () => {
@@ -548,6 +571,67 @@ describe("placing new threads", () => {
     await Bun.sleep(2);
     fleet.refusal = () => "VM Bridge reached this month's budget.";
     await expect(placeThread()).rejects.toThrow("VM Bridge reached this month's budget.");
+  });
+
+  test("waking a VM for a placement says which VM, and what the wake is doing as it goes", async () => {
+    const { primary, fleet, store } = await placed();
+    await fleet.sleep(primary);
+    await Bun.sleep(2);
+    const steps: string[] = [];
+    const details: string[] = [];
+    await fleet.placeThread("p1", {
+      load: (vm): VmLoad => ({ vmId: vm.id, awake: Boolean(fleet.backend(vm.id)), turns: 0, vcpus: 2, memory: null, disk: null }),
+      placed: () => {},
+      progress: (step) => steps.push(step),
+      detail: (text) => details.push(text),
+    });
+    expect(steps).toEqual([`Waking ${store.vm(primary)!.name} on boxd`]);
+    expect(details).toEqual(["Waiting for boxd", "Preparing the VM", "Starting T3", "Waiting for T3 to answer", "Reading T3's settings"]);
+  });
+
+  test("for OpenCode, a placement waits only until the VM is prepared, never for T3, which goes on starting", async () => {
+    const { primary, fleet } = await placed();
+    await fleet.sleep(primary);
+    await Bun.sleep(2);
+    const t3Answers = gate();
+    fleet.onConnect = () => t3Answers.promise;
+    const details: string[] = [];
+    const placement = await fleet.placeThread("p1", {
+      load: (vm): VmLoad => ({ vmId: vm.id, awake: Boolean(fleet.backend(vm.id)), turns: 0, vcpus: 2, memory: null, disk: null }),
+      placed: () => {},
+      progress: () => {},
+      detail: (text) => details.push(text),
+      forOpenCode: true,
+    });
+    expect(placement.vmId).toBe(primary);
+    expect(details).toEqual(["Waiting for boxd", "Preparing the VM"]);
+    expect(fleet.machineReady(primary)).toBe(true);
+    expect(fleet.backend(primary)).toBeUndefined();
+    t3Answers.release();
+    await until(() => Boolean(fleet.backend(primary)));
+  });
+
+  test("T3 failing after OpenCode took the VM leaves it awake for OpenCode", async () => {
+    const { primary, fleet, store, events } = await placed();
+    await fleet.sleep(primary);
+    await Bun.sleep(2);
+    const t3Answers = gate();
+    fleet.onConnect = async () => {
+      await t3Answers.promise;
+      throw new Error("T3 sent something unexpected.");
+    };
+    const wake = fleet.ensure(primary);
+    wake.catch(() => {});
+    await fleet.machine(primary);
+    // As a worktree being made, or OpenCode starting, holds it.
+    const release = fleet.lease(primary);
+    events.length = 0;
+    t3Answers.release();
+    await expect(wake).rejects.toThrow("T3 sent something unexpected.");
+    release();
+    expect(events).toEqual([]);
+    expect(store.vm(primary)).toMatchObject({ state: "error" });
+    expect(fleet.machineReady(primary)).toBe(true);
   });
 
   test("a sleeping VM with room is woken before a new one is made", async () => {
