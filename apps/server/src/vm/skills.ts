@@ -70,7 +70,21 @@ const instructionPaths = {
 const exists = (path) => { try { lstatSync(path); return true; } catch { return false; } };
 
 const incoming = JSON.parse(readFileSync(incomingPath, "utf8"));
-const previous = exists(manifestPath) ? JSON.parse(readFileSync(manifestPath, "utf8")) : { skills: {} };
+let previous = { skills: {} };
+if (exists(manifestPath)) {
+  try {
+    const parsed = JSON.parse(readFileSync(manifestPath, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      previous = {
+        skills: parsed.skills && typeof parsed.skills === "object" && !Array.isArray(parsed.skills) ? parsed.skills : {},
+        instructions:
+          parsed.instructions && typeof parsed.instructions === "object" && !Array.isArray(parsed.instructions) ? parsed.instructions : undefined,
+      };
+    }
+  } catch {
+    // A damaged manifest counts as none so recovery does not block connects.
+  }
+}
 const wanted = new Set(incoming.skills.map((skill) => skill.name));
 mkdirSync(store, { recursive: true });
 
@@ -87,7 +101,11 @@ for (const skill of incoming.skills) {
   rmSync(join(store, skill.name), { recursive: true, force: true });
   renameSync(staging, join(store, skill.name));
 }
-for (const name of Object.keys(previous.skills)) if (!wanted.has(name)) rmSync(join(store, name), { recursive: true, force: true });
+for (const name of Object.keys(previous.skills)) {
+  const target = resolve(store, name);
+  if (dirname(target) !== store || wanted.has(basename(target))) continue;
+  rmSync(target, { recursive: true, force: true });
+}
 
 for (const dir of agentDirs) {
   mkdirSync(dir, { recursive: true });
@@ -120,10 +138,19 @@ for (const [agent, path] of Object.entries(instructionPaths)) {
   } else if (ours) rmSync(path);
 }
 
-writeFileSync(
-  manifestPath,
-  JSON.stringify({ fingerprint: incoming.fingerprint, skills: Object.fromEntries(incoming.skills.map((skill) => [skill.name, skill.hash])), instructions: managed }),
-);
+const manifestTmp = manifestPath + ".vmbridge-new";
+rmSync(manifestTmp, { recursive: true, force: true });
+try {
+  writeFileSync(
+    manifestTmp,
+    JSON.stringify({ fingerprint: incoming.fingerprint, skills: Object.fromEntries(incoming.skills.map((skill) => [skill.name, skill.hash])), instructions: managed }),
+    { mode: 0o600, flag: "wx" },
+  );
+  renameSync(manifestTmp, manifestPath);
+} catch (error) {
+  rmSync(manifestTmp, { recursive: true, force: true });
+  throw error;
+}
 rmSync(incomingPath);
 `;
 
@@ -134,14 +161,22 @@ rmSync(incomingPath);
  */
 export async function syncSkills(box: Box, state: SkillsState, files: (name: string) => SkillFile[], manifestText?: string | null) {
   const text = manifestText === undefined ? await box.files.read(`${root}/skills.json`).catch(() => null) : manifestText;
-  let manifest: Manifest | null = null;
+  let manifest: Partial<Manifest> | null = null;
   try {
-    if (text !== null) manifest = JSON.parse(text) as Manifest;
+    if (text !== null) {
+      const parsed: unknown = JSON.parse(text);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) manifest = parsed as Partial<Manifest>;
+    }
   } catch {
     // A damaged manifest counts as none: every skill is sent again.
   }
-  if (manifest?.fingerprint === state.fingerprint) return false;
-  const skills = state.skills.map((skill) => (manifest?.skills[skill.name] === skill.hash ? skill : { ...skill, files: files(skill.name) }));
+  const existing = manifest?.skills && typeof manifest.skills === "object" && !Array.isArray(manifest.skills) ? manifest.skills : undefined;
+  const skillsMatch =
+    existing !== undefined &&
+    Object.keys(existing).length === state.skills.length &&
+    state.skills.every((skill) => existing[skill.name] === skill.hash);
+  if (skillsMatch && manifest?.fingerprint === state.fingerprint) return false;
+  const skills = state.skills.map((skill) => (existing?.[skill.name] === skill.hash ? skill : { ...skill, files: files(skill.name) }));
   await box.files.write(
     { [`${root}/skills.mjs`]: applyScript, [`${root}/skills-incoming.json`]: JSON.stringify({ fingerprint: state.fingerprint, skills, instructions: state.instructions }) },
     { mode: 0o600 },
