@@ -233,7 +233,15 @@ export function boxdWeb(client: BoxdWebClient, options: BoxdWebOptions): BoxdWeb
     let ran = false;
     let onAbort = () => {};
     try {
-      if (stdinPath) await writeFile(id, stdinPath, new TextEncoder().encode(input.stdin), `umask 077 && mkdir -p -m 700 -- ${stdinDir}`);
+      if (stdinPath) {
+        try {
+          await writeFile(id, stdinPath, new TextEncoder().encode(input.stdin), `umask 077 && mkdir -p -m 700 -- ${stdinDir}`);
+        } catch (error) {
+          if (input.signal?.aborted) return { exitCode: null, timedOut: true };
+          throw error;
+        }
+        if (input.signal?.aborted) return { exitCode: null, timedOut: true };
+      }
       const started = Date.now();
       const running = client.machines.exec(id, {
         command: execLine(input, stdinPath, tag),

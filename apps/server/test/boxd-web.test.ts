@@ -214,6 +214,37 @@ describe("commands over gRPC-web", () => {
     const left = Bun.spawnSync(["pgrep", "-f", marker]).stdout.toString().trim();
     expect(left).toBe("");
   });
+
+  test("aborting during stdin upload cleans up the uploaded file without launching the command", async () => {
+    const { client, commands } = fakeBoxd();
+    const provider = boxdWeb(client, { apiKey });
+    const { id } = await provider.create({ key: "abort-stdin", labels: {} });
+    const controller = new AbortController();
+    const originalUpload = client.machines.files.upload;
+    let uploadedPath = "";
+    client.machines.files.upload = async (machineId, path, data) => {
+      uploadedPath = path;
+      controller.abort();
+      return originalUpload(machineId, path, data);
+    };
+    const { input } = exec({ command: "echo should-not-run", stdin: "secret\n", signal: controller.signal });
+    expect(await provider.exec(id, input)).toEqual({ exitCode: null, timedOut: true });
+    expect(commands.some((command) => command.includes("should-not-run"))).toBe(false);
+    expect(commands).toContain(`rm -f -- '${uploadedPath}'`);
+
+    // If the upload itself fails after the signal aborted, exec still reports timeout and cleans up.
+    const failedController = new AbortController();
+    let failedPath = "";
+    client.machines.files.upload = async (_machineId, path) => {
+      failedPath = path;
+      failedController.abort();
+      throw new Error("upload interrupted");
+    };
+    const { input: failedInput } = exec({ command: "echo should-not-run-2", stdin: "secret\n", signal: failedController.signal });
+    expect(await provider.exec(id, failedInput)).toEqual({ exitCode: null, timedOut: true });
+    expect(commands.some((command) => command.includes("should-not-run-2"))).toBe(false);
+    expect(commands).toContain(`rm -f -- '${failedPath}'`);
+  });
 });
 
 describe("the provider maps boxd calls", () => {
