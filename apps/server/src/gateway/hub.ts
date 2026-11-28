@@ -15,7 +15,7 @@ import type { Stats } from "../vm/stats.ts";
 import { defaultAgents, pendingAgent, presentAgent, type AgentReport } from "./agents.ts";
 import { Attachments, maxUploadBytes } from "./attachments.ts";
 import type { FileTrees, Worktree } from "./files.ts";
-import { applyHeldCommand, nextTurnCommandTypes } from "./held.ts";
+import { applyHeldCommand, noteRefusedSetting } from "./held.ts";
 import { ProjectIcons } from "./icons.ts";
 import { isPathKey, projectForPath, projectRoot, translate, vmForPath, within, type Environments } from "./paths.ts";
 import { repositoryIdentity } from "./repos.ts";
@@ -440,7 +440,7 @@ export class Hub extends EventEmitter<HubEvents> {
         this.traffic.record({ kind: "system", operation: replayed, vmId, status: "error", reason: `${what}: ${reason}` });
       }
       if (outcome === "unanswered") return;
-      this.noteSetting(held.payload, outcome === "rejected");
+      noteRefusedSetting(this.refusedSettings, held.payload, outcome === "rejected");
       if (outcome === "rejected") this.store.dropHeldCommand(held.id);
       else this.answered.set(held.id, outcome);
       if (outcome === "rejected" || this.dropShown(vmId)) {
@@ -453,27 +453,22 @@ export class Hub extends EventEmitter<HubEvents> {
 
   /**
    * Waits until a connected VM has been sent the commands VM Bridge holds for it, so a command sent after them reaches
-   * it after them, as it would reach T3 after them. Fails when a setting held for the thread a message goes to was
-   * refused, in this replay or an earlier one: T3 clients send those settings just before a message and stop when one
-   * fails, so the message would otherwise run with the setting the user moved away from. Only that message fails.
+   * it after them, as it would reach T3 after them. Fails when held commands for this thread stay unanswered, or when a
+   * setting held for the thread a message goes to was refused, in this replay or an earlier one: T3 clients send those
+   * settings just before a message and stop when one fails, so the message would otherwise run with the setting the
+   * user moved away from. Only that message fails.
    */
   async afterHeld(vmId: string, payload: Wire) {
-    await this.replayHeld(vmId);
     const threadId = str(payload.threadId);
+    const pending = threadId
+      ? new Set(this.store.heldCommands(vmId).filter((row) => str(row.payload.threadId) === threadId).map((row) => row.id))
+      : null;
+    await this.replayHeld(vmId);
+    if (pending?.size && this.store.heldCommands(vmId).some((row) => pending.has(row.id) && !this.answered.has(row.id))) {
+      throw new Error("This VM did not confirm earlier changes yet, so this request was not sent. Try again.");
+    }
     if (payload.type !== "message.dispatch" || !threadId || !this.refusedSettings.delete(threadId)) return;
     throw new Error("This thread's VM refused the change to its settings, so the message was not sent. Check them and send it again.");
-  }
-
-  /** Remembers a next-turn setting the VM refused for its thread, or forgets an older refusal one it accepted replaces. */
-  private noteSetting(command: Wire, refused: boolean) {
-    const threadId = str(command.threadId);
-    const type = String(command.type);
-    if (!threadId || !nextTurnCommandTypes.has(type)) return;
-    const types = this.refusedSettings.get(threadId) ?? new Set<string>();
-    if (refused) types.add(type);
-    else types.delete(type);
-    if (types.size) this.refusedSettings.set(threadId, types);
-    else this.refusedSettings.delete(threadId);
   }
 
   /** Drops the held commands a VM accepted once its shell has reached them. Returns whether it dropped any. */

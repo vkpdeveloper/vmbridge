@@ -23,7 +23,19 @@ const heldCommandTypes = new Set([
 ]);
 
 /** Held settings a thread's next turn uses: a message sent after one is refused fails too, as it would have in T3. */
-export const nextTurnCommandTypes = new Set(["thread.runtime-mode.set", "thread.interaction-mode.set", "thread.model-selection.set"]);
+const nextTurnCommandTypes = new Set(["thread.runtime-mode.set", "thread.interaction-mode.set", "thread.model-selection.set"]);
+
+/** Remembers a next-turn setting the VM refused for its thread, or forgets an older refusal one it accepted replaces. */
+export function noteRefusedSetting(refusedSettings: Map<string, Set<string>>, command: Wire, refused: boolean) {
+  const threadId = str(command.threadId);
+  const type = String(command.type);
+  if (!threadId || !nextTurnCommandTypes.has(type)) return;
+  const types = refusedSettings.get(threadId) ?? new Set<string>();
+  if (refused) types.add(type);
+  else types.delete(type);
+  if (types.size) refusedSettings.set(threadId, types);
+  else refusedSettings.delete(threadId);
+}
 
 const renameFields = new Set(["type", "commandId", "threadId", "title"]);
 
