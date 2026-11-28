@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { findWorktreeProgram, fixWorktreeLinks, listWorktreesProgram, removeWorktreeProgram, worktreePath } from "../src/vm/opencode.ts";
+import { devRelayScript, findWorktreeProgram, fixWorktreeLinks, listWorktreesProgram, readWorktreeState, removeWorktreeProgram, worktreePath, worktreeStateProgram } from "../src/vm/opencode.ts";
 import { quote } from "../src/vm/runtime.ts";
 import { openDatabase } from "../src/bun/sqlite.ts";
 import type { Hub } from "../src/gateway/hub.ts";
@@ -116,6 +116,69 @@ describe("finding vmbridge opencode worktrees", () => {
     const names = sh(listWorktreesProgram(checkout)).trim().split("\n").map((line) => line.split("\t")[0]);
     expect(names.sort()).toEqual(["ab12cd34", "ef56ab78"]);
     expect(sh(findWorktreeProgram(checkout, "99999999"))).toBe("");
+  });
+});
+
+describe("the sidebar's look at a worktree", () => {
+  test("reads its branch and how far it is from origin's copy of its base, and nothing once it is gone", () => {
+    const { checkout, commit, remove } = setUp("ab12cd34");
+    commit("one");
+    commit("two");
+    sh("git -c user.name=t -c user.email=t@t commit --quiet --allow-empty -m theirs && git push --quiet origin main", checkout);
+    const look = () => readWorktreeState(sh(worktreeStateProgram(checkout, "ab12cd34", "main", false)));
+    expect(look()).toEqual({ branch: "opencode/ab12cd34", sync: { base: "main", ahead: 2, behind: 1 }, ports: [] });
+    sh("git reset --quiet --hard origin/main", worktreePath(checkout, "ab12cd34"));
+    expect(look()?.sync).toEqual({ base: "main", ahead: 0, behind: 0 });
+    remove();
+    expect(look()).toBeNull();
+  });
+
+  test("lists each port a program in the worktree listens on once, in order", () => {
+    const output = "branch\tfix/login\nport\t5173\nport\t3000\nport\t5173\n";
+    expect(readWorktreeState(output)?.ports).toEqual([3000, 5173]);
+  });
+});
+
+describe("relaying a dev server on its VM", () => {
+  test("asks for localhost without the proxy's forwarding headers, and passes WebSockets", async () => {
+    const seen: { host: string | null; forwarded: string | null }[] = [];
+    const dev = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(request, server) {
+        seen.push({ host: request.headers.get("host"), forwarded: request.headers.get("x-forwarded-host") });
+        if (server.upgrade(request)) return;
+        return new Response("page");
+      },
+      websocket: { message: (socket, message) => void socket.send(`echo ${message}`) },
+    });
+    const dir = mkdtempSync(join(tmpdir(), "vmb-relay-"));
+    dirs.push(dir);
+    const file = join(dir, "relay");
+    const relay = Bun.spawn(["node", "-e", devRelayScript, String(dev.port), file], { stdio: ["ignore", "ignore", "inherit"] });
+    try {
+      let port = "";
+      for (let tries = 0; !port && tries < 100; tries++) {
+        await Bun.sleep(50);
+        port = (await Bun.file(file).exists()) ? (await Bun.file(file).text()).split("\t")[1]! : "";
+      }
+      const page = await fetch(`http://127.0.0.1:${port}/`, { headers: { host: "box-3000.provider.dev", "x-forwarded-host": "box-3000.provider.dev" } });
+      expect(await page.text()).toBe("page");
+      expect(seen[0]).toEqual({ host: `localhost:${dev.port}`, forwarded: null });
+
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/hmr`);
+      const answer = await new Promise<string>((resolve, reject) => {
+        socket.onopen = () => socket.send("hi");
+        socket.onmessage = (event) => resolve(String(event.data));
+        socket.onerror = () => reject(new Error("The relayed socket failed."));
+      });
+      socket.close();
+      expect(answer).toBe("echo hi");
+      expect(seen[1]!.host).toBe(`localhost:${dev.port}`);
+    } finally {
+      relay.kill();
+      dev.stop(true);
+    }
   });
 });
 

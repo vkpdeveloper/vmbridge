@@ -7,6 +7,7 @@ import { DashboardAuth } from "./auth/dashboard.ts";
 import type { Passwords } from "./auth/password.ts";
 import { type Encryption, openEncryption, type KeySource } from "./encryption.ts";
 import { Fleet } from "./fleet.ts";
+import { fetchPullRequestStatus } from "./github.ts";
 import { Clones } from "./gateway/clones.ts";
 import { FileTrees } from "./gateway/files.ts";
 import { T3Gateway } from "./gateway/http.ts";
@@ -81,7 +82,7 @@ export function openBridge(runtime: BridgeRuntime) {
   const rpc = new Rpc(hub, clones, branches, traffic, () => secrets.has("github.token"), files);
   const hasOpenCodeKey = () => Boolean(settings.get("agentProfiles").opencode);
   const gateway = new T3Gateway(hub, rpc, clients, openCodeLauncher({ store, hub, clones, traffic, hasKey: hasOpenCodeKey, githubToken: () => secrets.get("github.token") }));
-  const opencode = new OpenCodeGateway(store, fleet, traffic, hasOpenCodeKey);
+  const opencode = new OpenCodeGateway(store, fleet, traffic, hasOpenCodeKey, (repository, branch) => fetchPullRequestStatus(repository, branch, secrets.get("github.token")));
   const auth = new DashboardAuth(db, secrets, runtime.passwords);
   const watch = new Watch({
     links: new WatchLinks(db, encryption),

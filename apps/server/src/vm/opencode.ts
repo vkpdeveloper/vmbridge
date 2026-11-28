@@ -51,6 +51,115 @@ export function listWorktreesProgram(checkout: string) {
 done`;
 }
 
+export interface WorktreeState {
+  branch: string;
+  sync: { base: string; ahead: number; behind: number } | null;
+  ports: number[];
+}
+
+/**
+ * Prints what the sidebar shows of a worktree, a tab-separated line each: `branch`, then `base` with how far it is
+ * behind and ahead of origin's copy of `base` (the default branch when null), fetched first when `fetch` is set, then a
+ * `port` line for each TCP port a program whose folder is in the worktree listens on: a dev server an agent started.
+ * Prints nothing when the worktree is gone.
+ */
+export function worktreeStateProgram(checkout: string, name: string, base: string | null, fetch: boolean) {
+  const path = quote(worktreePath(checkout, name));
+  return `[ -d ${path} ] || exit 0
+${fixWorktreeLinks(quote(checkout), path)}
+printf 'branch\\t%s\\n' "$(git -C ${path} rev-parse --abbrev-ref HEAD 2>/dev/null)"
+base=${quote(base ?? "")}
+[ -n "$base" ] || base="$(git -C ${path} symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)"
+if [ -n "$base" ]; then
+  ${fetch ? `(. ${root}/env 2>/dev/null; GIT_TERMINAL_PROMPT=0 timeout 20 git -C ${path} fetch --quiet origin "$base" >/dev/null 2>&1) || true` : ":"}
+  counts="$(git -C ${path} rev-list --left-right --count "origin/$base...HEAD" 2>/dev/null)" && printf 'base\\t%s\\t%s\\n' "$base" "$counts"
+fi
+{ ss -ltnpH 2>/dev/null || true; } | while read -r _ _ _ address _ users; do
+  pid="$(printf '%s' "$users" | sed -n 's/.*pid=\\([0-9]*\\).*/\\1/p')"
+  [ -n "$pid" ] || continue
+  case "$(readlink /proc/"$pid"/cwd 2>/dev/null)/" in ${path}/*) ;; *) continue ;; esac
+  printf 'port\\t%s\\n' "\${address##*:}"
+done`;
+}
+
+/**
+ * An HTTP relay on a free port on every address to `localhost:<port>`, which writes its process ID and port to a file
+ * once it listens. It tells the server the request is for `localhost:<port>` and drops the proxy's forwarding headers,
+ * as dev servers refuse other hosts (Vite) or check them against the page's origin (Next). WebSockets pass too.
+ */
+export const devRelayScript = `const http = require("http");
+const net = require("net");
+const [port, file] = [Number(process.argv[1]), process.argv[2]];
+const host = "localhost:" + port;
+const headers = (raw) => {
+  const kept = [];
+  for (let i = 0; i < raw.length; i += 2) {
+    const name = raw[i].toLowerCase();
+    if (name === "forwarded" || name.startsWith("x-forwarded-")) continue;
+    kept.push(raw[i], name === "host" ? host : raw[i + 1]);
+  }
+  return kept;
+};
+const server = http.createServer((request, response) => {
+  const upstream = http.request({ host: "localhost", port, method: request.method, path: request.url, headers: headers(request.rawHeaders) }, (answer) => {
+    response.writeHead(answer.statusCode, answer.rawHeaders);
+    answer.pipe(response);
+  });
+  upstream.on("error", () => {
+    if (!response.headersSent) response.writeHead(502);
+    response.end();
+  });
+  request.pipe(upstream);
+});
+server.on("upgrade", (request, socket, head) => {
+  const upstream = net.connect({ port, host: "localhost" }, () => {
+    const lines = [request.method + " " + request.url + " HTTP/1.1"];
+    const kept = headers(request.rawHeaders);
+    for (let i = 0; i < kept.length; i += 2) lines.push(kept[i] + ": " + kept[i + 1]);
+    upstream.write(lines.join("\\r\\n") + "\\r\\n\\r\\n");
+    upstream.write(head);
+    socket.pipe(upstream).pipe(socket);
+  });
+  upstream.on("error", () => socket.destroy());
+  socket.on("error", () => upstream.destroy());
+});
+server.listen(0, "0.0.0.0", () => require("fs").writeFileSync(file, process.pid + "\\t" + server.address().port));`;
+
+/**
+ * Prints the port a provider's preview reaches the dev server on `port` through: a relay (see `devRelayScript`), which
+ * also reaches a server listening only on loopback, as Vite does by default, where a provider's proxy cannot. It reuses
+ * the relay it started before while that runs.
+ */
+export function devRelayProgram(port: number) {
+  const file = `/tmp/vmbridge-dev-relay-${port}`;
+  return `if [ -s ${file} ] && kill -0 "$(cut -f1 ${file})" 2>/dev/null; then cut -f2 ${file}; exit 0; fi
+rm -f ${file}
+. ${root}/env
+nohup node -e ${quote(devRelayScript)} ${port} ${file} >/dev/null 2>&1 &
+for _ in $(seq 50); do [ -s ${file} ] && break; sleep 0.1; done
+cut -f2 ${file}`;
+}
+
+/** Reads what `worktreeStateProgram` printed, or null when the worktree is gone. */
+export function readWorktreeState(output: string): WorktreeState | null {
+  const state: WorktreeState = { branch: "", sync: null, ports: [] };
+  for (const line of output.split("\n")) {
+    const [kind, ...fields] = line.split("\t");
+    if (kind === "branch") state.branch = fields[0] ?? "";
+    else if (kind === "base" && fields.length === 3) {
+      const [base, behind, ahead] = fields as [string, string, string];
+      state.sync = { base, ahead: Number(ahead), behind: Number(behind) };
+    } else if (kind === "port") {
+      const port = Number(fields[0]);
+      // Each address family lists a port once.
+      if (Number.isInteger(port) && port > 0 && !state.ports.includes(port)) state.ports.push(port);
+    }
+  }
+  if (!state.branch) return null;
+  state.ports.sort((a, b) => a - b);
+  return state;
+}
+
 /**
  * Removes a worktree and its `opencode/<name>` branch once nothing would be lost: no uncommitted or untracked files,
  * and no commit that is not on the remote. Prints `removed`, or `kept` and the branch it is on, which an agent may have

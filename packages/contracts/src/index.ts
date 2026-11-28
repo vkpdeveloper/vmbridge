@@ -708,6 +708,8 @@ export type OpenCodeLaunchEvent =
         password: string;
         projectId: string;
         project: string;
+        /** The repository's page, when it is on GitHub. */
+        repositoryUrl: string | null;
         vmId: string;
         vm: string;
         /** The VM's provider, as people know it, such as "Boat". */
@@ -724,7 +726,6 @@ export type OpenCodeLaunchEvent =
       };
     };
 
-/** A worktree `vmbridge opencode resume` can open again, as `GET /api/vmbridge/opencode?remote=` lists them. */
 /** A pull request on GitHub, by the state it shows there. */
 export interface PullRequest {
   number: number;
@@ -732,6 +733,25 @@ export interface PullRequest {
   state: "open" | "draft" | "merged" | "closed";
 }
 
+/** A pull request with its last commit's checks and its review, both null when it is not open or VM Bridge has no GitHub token. */
+export interface PullRequestStatus extends PullRequest {
+  checks: "passing" | "failing" | "running" | null;
+  review: "approved" | "changes requested" | "review required" | null;
+}
+
+/** `GET <worktree address>/vmbridge/status`, for `vmbridge opencode`'s sidebar. Asking wakes no VM. */
+export interface OpenCodeWorktreeStatus {
+  /** From git on the VM while it is awake, else the branch VM Bridge last noted. */
+  branch: string | null;
+  pullRequest: PullRequestStatus | null;
+  vm: VmState | null;
+  /** How far the branch is from origin's copy of the branch it started from, while the VM is awake. */
+  sync: { base: string; ahead: number; behind: number } | null;
+  /** Ports that programs started in the worktree listen on, relayed at `<worktree address>/vmbridge/port/<port>/`. */
+  ports: number[];
+}
+
+/** A worktree `vmbridge opencode resume` can open again, as `GET /api/vmbridge/opencode?remote=` lists them. */
 export interface OpenCodeWorktree {
   name: string;
   /** The branch it is on, as its VM last said. It starts as `opencode/<name>`, and an agent may switch it. */

@@ -17,7 +17,7 @@ import { hasLiveWork, type Shell } from "./gateway/types.ts";
 import type { Skills } from "./skills.ts";
 import { Bases } from "./vm/bases.ts";
 import { newToken } from "./auth/tokens.ts";
-import { findWorktreeProgram, fixWorktreeLinks, listWorktreesProgram, NoOpenCodeKey, openCodeBusy, OpenCodeServer, opencodePort, removeWorktreeProgram, startOpenCode, stopOpenCode, worktreeName, worktreePath } from "./vm/opencode.ts";
+import { findWorktreeProgram, fixWorktreeLinks, listWorktreesProgram, NoOpenCodeKey, openCodeBusy, OpenCodeServer, opencodePort, devRelayProgram, readWorktreeState, removeWorktreeProgram, startOpenCode, stopOpenCode, worktreeName, worktreePath, worktreeStateProgram, type WorktreeState } from "./vm/opencode.ts";
 import { syncSkills } from "./vm/skills.ts";
 import { checkoutRoot, credentialsFingerprint, prepareVm, quote, readCodexAuth, runProgram, resolveT3Version, startT3, t3Port, writeCodexAuth, writeCredentials, type VmCredentials } from "./vm/runtime.ts";
 
@@ -83,6 +83,8 @@ export const reconcileEveryMs = 10 * 60_000;
  * awake from before OpenCode was added reaches it once it sleeps and wakes. Other providers open any port on demand.
  */
 const vmPorts = [t3Port, opencodePort];
+/** How often the sidebar's look at a worktree fetches its base branch, to say how far behind it is. */
+const baseFetchMs = 10 * 60_000;
 /** Provider keys VM Bridge creates: a VM's ID, with a suffix when it starts from a snapshot or checkpoint. */
 const vmKey = /^([0-9a-f]{12})(?:-[0-9a-z]+)?$/;
 /** Provider keys of base snapshot build VMs (see vm/bases.ts). */
@@ -128,6 +130,10 @@ export class Fleet extends EventEmitter<FleetEvents> {
   private readonly registrations = new Map<string, Promise<void>>();
   /** OpenCode on awake VMs, from its first use until the VM goes offline. */
   private readonly opencodes = new Map<string, Promise<OpenCodeServer>>();
+  /** When each OpenCode worktree's base branch was last fetched, by `<vmId>/<name>`. */
+  private readonly baseFetchedAt = new Map<string, number>();
+  /** Previews of dev servers' ports, by the machine they were made on and the port. */
+  private readonly portPreviews = new WeakMap<Box, Map<number, Promise<Preview>>>();
   private readonly placing = new Map<string, Promise<string>>();
   private readonly locks = new Map<string, Promise<unknown>>();
   private readonly leases = new Map<string, number>();
@@ -167,7 +173,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
     private readonly traffic: Traffic,
     private readonly agents: AgentAuth,
     private readonly skills: Pick<Skills, "state" | "files">,
-    private readonly openSocket: OpenSocket,
+    readonly openSocket: OpenSocket,
   ) {
     super();
     this.on("offline", (vmId) => this.opencodes.delete(vmId));
@@ -1180,6 +1186,60 @@ printf '%s' "$base"`,
     } finally {
       release();
     }
+  }
+
+  /**
+   * What the sidebar shows of a worktree, read on its VM: its branch, how far that is from origin's copy of `base`
+   * (fetched at most every few minutes) and the dev servers started in it. Null while the VM is asleep or when the
+   * worktree is gone. It holds no lease and notes no activity: the sidebar asks every minute, and that must not keep an
+   * idle VM awake.
+   */
+  async worktreeState(vmId: string, projectId: string, name: string, base: string | null): Promise<WorktreeState | null> {
+    const box = this.machineReady(vmId) ? this.boxes.get(vmId) : undefined;
+    const checkout = this.project(projectId).vms.find((entry) => entry.vmId === vmId)?.checkoutPath;
+    if (!box || !checkout || !worktreeName.test(name)) return null;
+    const key = `${vmId}/${name}`;
+    const fetch = Date.now() - (this.baseFetchedAt.get(key) ?? 0) > baseFetchMs;
+    if (fetch) this.baseFetchedAt.set(key, Date.now());
+    return readWorktreeState(await runProgram(box, worktreeStateProgram(checkout, name, base, fetch), "Reading a worktree's state", 30_000));
+  }
+
+  /**
+   * A provider preview of the dev server on `port` on an awake VM, through a relay on the VM (see `devRelayProgram`),
+   * or null while the VM sleeps. A preview is kept for the
+   * machine it was made on, which a wake replaces, until a minute before it expires. A page's first load asks for
+   * many files at once, and they share one preview.
+   */
+  async portPreview(vmId: string, port: number): Promise<Preview | null> {
+    const vm = this.store.vm(vmId);
+    const box = this.machineReady(vmId) ? this.boxes.get(vmId) : undefined;
+    if (!vm || !box) return null;
+    let previews = this.portPreviews.get(box);
+    if (!previews) {
+      previews = new Map();
+      this.portPreviews.set(box, previews);
+    }
+    const kept = previews.get(port);
+    if (kept) {
+      const preview = await kept.catch(() => null);
+      if (preview && (preview.expiresAt === undefined || preview.expiresAt - Date.now() > 60_000)) return preview;
+      if (previews.get(port) === kept) previews.delete(port);
+    }
+    let making = previews.get(port);
+    if (!making) {
+      const driver = this.driver(vm.provider);
+      making = runProgram(box, devRelayProgram(port), "Relaying a dev server", 15_000).then((answer) => {
+        const reachable = Number(answer.trim());
+        if (!Number.isInteger(reachable) || reachable <= 0) throw new Error(`Port ${port} on VM ${vmId} cannot be reached.`);
+        return driver.preview ? driver.preview(box, reachable) : box.preview(reachable);
+      });
+      const made = making;
+      previews.set(port, made);
+      made.catch(() => {
+        if (previews.get(port) === made) previews.delete(port);
+      });
+    }
+    return making;
   }
 
   /**

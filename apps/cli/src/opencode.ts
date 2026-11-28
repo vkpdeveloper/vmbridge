@@ -188,7 +188,12 @@ async function open(root: string, body: { remote: string; branch: string | null;
     env: {
       ...process.env,
       OPENCODE_PASSWORD: ready.password,
-      OPENCODE_CLI_CONFIG_CONTENT: sidebarConfig({ repository: ready.project, vm: ready.provider ? `${ready.vm} (${ready.provider})` : ready.vm }),
+      OPENCODE_CLI_CONFIG_CONTENT: sidebarConfig({
+        repository: ready.project,
+        repositoryUrl: ready.repositoryUrl ?? null,
+        vm: ready.provider ? `${ready.vm} (${ready.provider})` : ready.vm,
+        status: new URL(`${ready.path}/vmbridge/status`, session.url).toString(),
+      }),
     },
     stdio: ["inherit", "inherit", "inherit"],
   });

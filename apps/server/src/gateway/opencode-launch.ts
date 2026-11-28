@@ -109,12 +109,14 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
         await opening;
         traffic.record({ kind: "system", operation: `OpenCode worktree for ${project.title}`, vmId, status: "ok", durationMs: Math.round(performance.now() - started) });
         const vm = store.vm(vmId);
+        const github = githubName(project.url);
         send({
           ready: {
             path: `${openCodePrefix}${project.id}/w/${vmId}/${worktree.name}`,
             password,
             projectId: project.id,
             project: project.title,
+            repositoryUrl: github ? `https://github.com/${github}` : null,
             vmId,
             vm: vm?.name ?? vmId,
             provider: vm ? providers[vm.provider].label : "",

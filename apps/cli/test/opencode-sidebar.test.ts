@@ -21,7 +21,7 @@ test("OpenCode gets the user's own terminal plugins and then the sidebar, as the
   mkdirSync(process.env.OPENCODE_CONFIG_DIR);
   writeFileSync(join(process.env.OPENCODE_CONFIG_DIR, "cli.json"), `{\n  // theirs\n  "plugins": ["opencode.example", { "package": "./status" }],\n}\n`);
 
-  const options = { repository: "medzimi", vm: "vm-b593d5 (Boat)" };
+  const options = { repository: "medzimi", repositoryUrl: "https://github.com/acme/medzimi", vm: "vm-b593d5 (Boat)", status: "http://127.0.0.1:3774/opencode/p/w/vm/ab12cd34/vmbridge/status" };
   const folder = join(dir, "vmbridge", "opencode-sidebar");
   expect(JSON.parse(sidebarConfig(options))).toEqual({ plugins: ["opencode.example", { package: "./status" }, { package: folder, options }] });
   expect(existsSync(join(folder, "tui.tsx"))).toBe(true);

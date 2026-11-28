@@ -290,7 +290,11 @@ does for a new thread (waking one, or making one when the others are full), clon
 there if needed, makes a worktree on a new `opencode/<id>` branch and opens OpenCode in it. Each step
 shows as it happens. The worktree starts from your current branch when origin has it, otherwise from
 the default branch. Once it opens, OpenCode shows a toast naming the VM it runs on, and its sidebar
-shows the repository, the branch the worktree is on now and the VM.
+shows the repository, the branch the worktree is on now and how far it is from the branch it started
+from, that branch's pull request once it has one with its checks and review, and the VM, noting when
+it is asleep. Clicking the pull request, its checks or the repository opens it on GitHub. A dev server
+an agent starts in the worktree shows up there too, at a `localhost` address on your computer that
+VM Bridge relays to the VM, so its page and live reload work as if it ran locally.
 
 It needs an OpenCode API key in **Accounts** and OpenCode 2 on your computer
 (`npm install -g @opencode/cli`). On the computer VM Bridge runs on, the command signs itself in; on

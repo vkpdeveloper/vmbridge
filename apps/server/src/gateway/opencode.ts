@@ -1,12 +1,15 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import type { OpenCodeWorktreeStatus, PullRequestStatus } from "@vmbridge/contracts";
 import { BudgetReached } from "../budget.ts";
 import { message, NoProvider, type Fleet } from "../fleet.ts";
 import { providers } from "../providers/index.ts";
 import { primaryVm, type Store } from "../store.ts";
 import type { Traffic } from "../traffic.ts";
+import { previewTarget } from "../vm/backend.ts";
 import { cliVersion, NoOpenCodeKey, OpenCodeUnreachable, worktreeName, worktreePath, type OpenCodeServer } from "../vm/opencode.ts";
 import type { Viewer, WatchUpgrade } from "../watch/watch.ts";
 import { previewRelay } from "./preview.ts";
+import { githubName } from "./repos.ts";
 
 /**
  * Each project's OpenCode address is VM Bridge's own with this and the project's ID after it. OpenCode's clients keep
@@ -71,6 +74,16 @@ const connectPath = /^\/auth\/connect\/([^/]+)$/;
 
 /** Pairing on the VM would hand out a credential for its own server, which only VM Bridge holds. */
 const blocked = (path: string) => path === "/api/pair" || path.startsWith("/api/pair/") || path.startsWith("/auth/");
+
+/** VM Bridge answers this itself, at a worktree's address, for `vmbridge opencode`'s sidebar. */
+const statusPath = "/vmbridge/status";
+/**
+ * A port on a worktree's VM, at the worktree's address, and the path to ask there. VM Bridge relays it through the
+ * provider's preview of that port, holding the preview's credentials, so the sidebar can open a dev server here.
+ */
+const devPortPath = /^\/vmbridge\/port\/([1-9]\d{0,4})(?=\/|$)/;
+/** The WebSocket subprotocols a relayed dev server's client asked for, such as Vite's `vite-hmr`, sent on to the VM. */
+const protocolsHeader = "x-vmbridge-protocols";
 
 /**
  * Not sent on to the VM: credentials are VM Bridge's to check and the VM's to get, hop-by-hop headers belong to this
@@ -222,6 +235,8 @@ export class OpenCodeGateway {
     private readonly traffic: Traffic,
     /** Whether VM Bridge has an OpenCode key to give VMs. OpenCode is not started without one. */
     private readonly hasKey: () => boolean,
+    /** The pull request from a branch of a GitHub repository (`owner/name`), as GitHub answers with VM Bridge's token. */
+    private readonly pullRequest: (repository: string, branch: string) => Promise<PullRequestStatus | null>,
     /**
      * How long a request waits for its VM to wake and OpenCode to start before it is told to try again. OpenCode's
      * clients wait as long as it takes, so this is just under the 100 seconds Cloudflare's tunnel waits for an answer.
@@ -389,6 +404,15 @@ export class OpenCodeGateway {
       seen.refusal = password === null ? "no password" : "wrong password";
       return unauthorized(request);
     }
+    if (signedIn && request.method === "GET" && pathname === statusPath) {
+      return target.worktree ? await this.worktreeStatus(project.id, project.url, target.worktree) : notFound();
+    }
+    const devPort = signedIn ? devPortPath.exec(target.path) : null;
+    if (devPort) {
+      const port = Number(devPort[1]);
+      const rest = target.path.slice(devPort[0].length);
+      return target.worktree && port <= 65_535 ? await this.devServer(request, relay, target.worktree.vmId, port, rest.startsWith("/") ? rest : `/${rest}`) : notFound();
+    }
     if (!this.hasKey()) return problem(503, new NoOpenCodeKey().message);
 
     // A worktree's VM, which must be one of the project's, holding its checkout.
@@ -418,13 +442,99 @@ export class OpenCodeGateway {
     seen.vmId = vmId;
     if (target.worktree) this.noteUse(project.id, target.worktree.name, request, pathname);
     const path = folder ? this.atWorktree(target.path, request.method, folder) : target.path;
-    if (upgrade) return this.socket(request, relay, vmId, server, path, seen);
+    if (upgrade) {
+      const open = () =>
+        server.socket(path).catch((error: unknown) => {
+          if (error instanceof OpenCodeUnreachable) this.fleet.forgetOpenCode(vmId, server);
+          throw error;
+        });
+      return this.socket(request, relay, vmId, open, seen);
+    }
     const response = await this.forward(request, vmId, server, path, seen);
     // The app works in the worktree, or else in the folder OpenCode started in on the VM: its checkout.
     const directory = folder ?? project.vms.find((entry) => entry.vmId === vmId)?.checkoutPath;
     const vm = this.store.vm(vmId);
     if (request.method !== "GET" || pathname !== "/api/event" || !response.ok || !directory || !vm) return response;
     return withToast(response, directory, `Running on ${vm.name} (${providers[vm.provider].label})`);
+  }
+
+  /**
+   * A worktree's branch, its pull request, its VM's state, how far it is from its base and the dev servers started in
+   * it, waking no VM. The branch comes from git on the VM when it is awake: OpenCode's own branch info can miss an
+   * agent's switch, as its watcher does not always see one on a Boat VM. Asleep, it is the branch VM Bridge last noted.
+   * What git says is noted too, so `vmbridge opencode resume` lists it.
+   */
+  private async worktreeStatus(projectId: string, url: string, worktree: { vmId: string; name: string }) {
+    const noted = this.store.openCodeWorktrees(projectId).find((row) => row.name === worktree.name);
+    const state = await this.fleet.worktreeState(worktree.vmId, projectId, worktree.name, noted?.base ?? null).catch(() => null);
+    if (state && noted && state.branch !== noted.branch) this.store.setOpenCodeWorktreeBranch(projectId, worktree.name, state.branch);
+    const branch = state?.branch ?? noted?.branch ?? null;
+    const github = githubName(url);
+    const status: OpenCodeWorktreeStatus = {
+      branch,
+      pullRequest: github && branch && branch !== "HEAD" ? await this.pullRequest(github, branch) : null,
+      vm: this.store.vm(worktree.vmId)?.state ?? null,
+      sync: state?.sync ?? null,
+      ports: state?.ports ?? [],
+    };
+    return Response.json(status, { headers: { "cache-control": "no-store" } });
+  }
+
+  /**
+   * Relays a request, or a WebSocket, to `port` on an awake VM through the provider's preview of it. Unlike OpenCode's,
+   * a dev server's cookies pass both ways, as its app may sign in with them, except the preview's own credentials.
+   * It is not recorded as traffic: a dev server's page loads hundreds of files.
+   */
+  private async devServer(request: Request, relay: WatchUpgrade, vmId: string, port: number, path: string) {
+    const preview = await this.fleet.portPreview(vmId, port);
+    if (!preview) return tryAgain("This worktree's VM is asleep. A prompt in OpenCode wakes it.");
+    const target = previewTarget(preview, path);
+    const own = Object.entries(preview.headers ?? {});
+    if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
+      const protocols = request.headers.get(protocolsHeader)?.split(",").map((protocol) => protocol.trim()).filter(Boolean);
+      return this.socket(request, relay, vmId, () => this.fleet.openSocket(target, Object.fromEntries(own), 15_000, protocols), {});
+    }
+    const headers = new Headers(request.headers);
+    // The app's own credentials pass. Basic auth is VM Bridge's password, which the sidebar sends as `auth_token`
+    // instead so an app's own `Authorization` reaches it.
+    const ownAuthorization = headers.get("authorization");
+    for (const name of droppedRequestHeaders) if (name !== "cookie") headers.delete(name);
+    if (ownAuthorization && !/^Basic\s/i.test(ownAuthorization)) headers.set("authorization", ownAuthorization);
+    headers.delete(protocolsHeader);
+    headers.set("accept-encoding", "identity");
+    for (const [name, value] of own) {
+      const theirs = name.toLowerCase() === "cookie" ? headers.get("cookie") : null;
+      headers.set(name, theirs ? `${value}; ${theirs}` : value);
+    }
+    const hasBody = request.method !== "GET" && request.method !== "HEAD" && request.body !== null;
+    const release = this.fleet.lease(vmId);
+    let upstream: Response;
+    try {
+      upstream = await fetch(target, {
+        method: request.method,
+        headers,
+        ...(hasBody ? { body: request.body, duplex: "half" } : {}),
+        redirect: "manual",
+        signal: AbortSignal.any([request.signal, this.endSignal(vmId)]),
+      });
+    } catch {
+      // The error could name the preview's address.
+      return problem(502, `Nothing answered on port ${port} of this worktree's VM.`);
+    } finally {
+      release();
+    }
+    const answer = new Headers(upstream.headers);
+    for (const name of droppedResponseHeaders) answer.delete(name);
+    const previewCookies = new Set(
+      own.filter(([name]) => name.toLowerCase() === "cookie").flatMap(([, value]) => value.split(";").map((cookie) => cookie.split("=")[0]!.trim())),
+    );
+    for (const cookie of upstream.headers.getSetCookie()) if (!previewCookies.has(cookie.split("=")[0]!.trim())) answer.append("set-cookie", cookie);
+    // A redirect to the preview's own address stays here, at the same path.
+    const location = answer.get("location");
+    const to = location ? URL.parse(location, target.href) : null;
+    if (to?.origin === target.origin) answer.set("location", `${to.pathname}${to.search}${to.hash}`);
+    return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers: answer });
   }
 
   /**
@@ -493,18 +603,8 @@ export class OpenCodeGateway {
     return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers: answer });
   }
 
-  private socket(request: Request, relay: WatchUpgrade, vmId: string, server: OpenCodeServer, path: string, seen: Seen) {
-    const stream = {
-      vmId,
-      ...previewRelay(
-        () =>
-          server.socket(path).catch((error: unknown) => {
-            if (error instanceof OpenCodeUnreachable) this.fleet.forgetOpenCode(vmId, server);
-            throw error;
-          }),
-        () => this.relays.delete(stream),
-      ),
-    };
+  private socket(request: Request, relay: WatchUpgrade, vmId: string, open: () => Promise<WebSocket>, seen: Seen) {
+    const stream = { vmId, ...previewRelay(open, () => this.relays.delete(stream)) };
     const viewer: Viewer = {
       ...stream.viewer,
       received: (data) => {

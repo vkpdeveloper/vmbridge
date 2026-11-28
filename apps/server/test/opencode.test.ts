@@ -53,7 +53,7 @@ function setup({ awake = true, wakeMs = 0, wakeWaitMs = 1_000, port = vm.port } 
   store.addProjectVm("p1", "vm1");
   store.setOpenCodePassword("p1", projectPassword);
   store.setOpenCodePassword("p2", "other-pass");
-  const calls = { place: [] as string[], wake: 0, forgot: 0 };
+  const calls = { place: [] as string[], wake: 0, forgot: 0, branch: "fix/login" as string | null };
   let up = awake;
   const server = new OpenCodeServer("vm1", preview(port ?? 0), vmPassword, openSocket);
   const fleet = Object.assign(new EventEmitter(), {
@@ -69,12 +69,23 @@ function setup({ awake = true, wakeMs = 0, wakeWaitMs = 1_000, port = vm.port } 
       up = true;
     },
     opencode: async () => server,
+    // What git on the VM says of the worktree, when the VM is awake.
+    worktreeState: async (_vmId: string, _projectId: string, _name: string, base: string | null) =>
+      up ? { branch: calls.branch, sync: { base: base ?? "main", ahead: 2, behind: 1 }, ports: [5173] } : null,
+    portPreview: async () => (up ? preview(port ?? 0) : null),
+    openSocket,
     lease: () => () => {},
     touch: () => {},
     forgetOpenCode: () => void calls.forgot++,
   }) as unknown as Fleet;
-  const gateway = new OpenCodeGateway(store, fleet, new Traffic(db), () => true, wakeWaitMs);
-  return { gateway, calls, store };
+  const pullRequests: { repository: string; branch: string }[] = [];
+  const pullRequest = async (repository: string, branch: string) => {
+    pullRequests.push({ repository, branch });
+    if (branch !== "fix/login") return null;
+    return { number: 7, url: `https://github.com/${repository}/pull/7`, state: "open" as const, checks: "failing" as const, review: "approved" as const };
+  };
+  const gateway = new OpenCodeGateway(store, fleet, new Traffic(db), () => true, pullRequest, wakeWaitMs);
+  return { gateway, calls, store, pullRequests };
 }
 
 const basic = (password: string) => `Basic ${btoa(`opencode:${password}`)}`;
@@ -125,6 +136,67 @@ describe("OpenCode gateway", () => {
     expect(request!.headers.get("x-preview")).toBe(previewHeader);
     expect(request!.headers.get("cookie")).toBeNull();
     await expectNoSecrets(response);
+  });
+
+  test("answers a worktree's branch from git on the VM, its pull request, base and dev servers, waking no VM, and notes the branch", async () => {
+    const { gateway, calls, store, pullRequests } = setup();
+    store.addOpenCodeWorktree({ projectId: "p1", vmId: "vm1", name: "ab12cd34", branch: "opencode/ab12cd34", base: "main" });
+    const ask = async (path: string, password = projectPassword) => {
+      const response = await send(gateway, path, { headers: { authorization: basic(password) } });
+      return response.status === 200 ? await response.json() : response.status;
+    };
+    const status = "/opencode/p1/w/vm1/ab12cd34/vmbridge/status";
+    expect(await ask(status)).toEqual({
+      branch: "fix/login",
+      pullRequest: { number: 7, url: "https://github.com/acme/p1/pull/7", state: "open", checks: "failing", review: "approved" },
+      vm: "ready",
+      sync: { base: "main", ahead: 2, behind: 1 },
+      ports: [5173],
+    });
+    expect(store.openCodeWorktrees("p1")[0]!.branch).toBe("fix/login");
+    calls.branch = "HEAD";
+    expect(await ask(status)).toMatchObject({ branch: "HEAD", pullRequest: null });
+    expect(await ask(status, "other-pass")).toBe(401);
+    expect(await ask("/opencode/p1/vmbridge/status")).toBe(404);
+    expect(pullRequests).toEqual([{ repository: "acme/p1", branch: "fix/login" }]);
+    expect(calls.wake).toBe(0);
+    expect(asked).toEqual([]);
+  });
+
+  test("answers the branch VM Bridge noted while the worktree's VM sleeps", async () => {
+    const { gateway, calls, store } = setup({ awake: false });
+    store.addOpenCodeWorktree({ projectId: "p1", vmId: "vm1", name: "ab12cd34", branch: "opencode/ab12cd34", base: "main" });
+    const response = await send(gateway, "/opencode/p1/w/vm1/ab12cd34/vmbridge/status", { headers: { authorization: basic(projectPassword) } });
+    expect(await response.json()).toEqual({ branch: "opencode/ab12cd34", pullRequest: null, vm: "sleeping", sync: null, ports: [] });
+    expect(calls.wake).toBe(0);
+  });
+
+  test("relays a dev server's port with the preview's credentials, passing its own cookies both ways", async () => {
+    const { gateway } = setup();
+    const response = await send(gateway, `/opencode/p1/w/vm1/ab12cd34/vmbridge/port/5173/src/main.ts?v=1&auth_token=${btoa(`opencode:${projectPassword}`)}`, {
+      headers: { authorization: "Bearer app-token", cookie: "theme=dark" },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("set-cookie")).toBe(`session=${vmPassword}`);
+    const [request] = asked;
+    expect(request!.path).toBe(`/src/main.ts?v=1&preview_token=${previewToken}`);
+    expect(request!.headers.get("x-preview")).toBe(previewHeader);
+    expect(request!.headers.get("cookie")).toBe("theme=dark");
+    expect(request!.headers.get("authorization")).toBe("Bearer app-token");
+    await send(gateway, "/opencode/p1/w/vm1/ab12cd34/vmbridge/port/5173/", { headers: { authorization: basic(projectPassword) } });
+    expect(asked[1]!.headers.get("authorization")).toBeNull();
+
+    expect((await send(gateway, "/opencode/p1/w/vm1/ab12cd34/vmbridge/port/5173")).status).toBe(401);
+    expect((await send(gateway, "/opencode/p1/vmbridge/port/5173/", { headers: { authorization: basic(projectPassword) } })).status).toBe(404);
+    expect(asked).toHaveLength(2);
+  });
+
+  test("answers a dev server's port on a sleeping VM without waking it", async () => {
+    const { gateway, calls } = setup({ awake: false });
+    const response = await send(gateway, "/opencode/p1/w/vm1/ab12cd34/vmbridge/port/5173/", { headers: { authorization: basic(projectPassword) } });
+    expect(response.status).toBe(503);
+    expect(calls.wake).toBe(0);
+    expect(asked).toEqual([]);
   });
 
   test("finds the project by its password for requests at the root, as `opencode api` sends them", async () => {
