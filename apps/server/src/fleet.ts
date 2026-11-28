@@ -17,7 +17,7 @@ import { hasLiveWork, type Shell } from "./gateway/types.ts";
 import type { Skills } from "./skills.ts";
 import { Bases } from "./vm/bases.ts";
 import { newToken } from "./auth/tokens.ts";
-import { findWorktreeProgram, fixWorktreeLinks, listWorktreesProgram, NoOpenCodeKey, openCodeBusy, OpenCodeServer, opencodePort, devRelayProgram, readWorktreeState, removeWorktreeProgram, startOpenCode, stopOpenCode, worktreeName, worktreePath, worktreeStateProgram, type WorktreeState } from "./vm/opencode.ts";
+import { findWorktreeProgram, fixWorktreeLinks, listWorktreesProgram, NoOpenCodeKey, openCodeBusy, OpenCodeServer, opencodePort, devRelayHeaders, devRelayPort, devRelayProgram, readWorktreeState, removeWorktreeProgram, startOpenCode, stopOpenCode, worktreeName, worktreePath, worktreeStateProgram, type WorktreeState } from "./vm/opencode.ts";
 import { syncSkills } from "./vm/skills.ts";
 import { checkoutRoot, credentialsFingerprint, prepareVm, quote, readCodexAuth, runProgram, resolveT3Version, startT3, t3Port, writeCodexAuth, writeCredentials, type VmCredentials } from "./vm/runtime.ts";
 
@@ -80,9 +80,9 @@ export const reconcileEveryMs = 10 * 60_000;
 
 /**
  * What VM Bridge reaches on each VM. Railway opens only the ports a VM was made or last woken with, so a Railway VM
- * awake from before OpenCode was added reaches it once it sleeps and wakes. Other providers open any port on demand.
+ * awake from before a port was added reaches it once it sleeps and wakes. Other providers open any port on demand.
  */
-const vmPorts = [t3Port, opencodePort];
+const vmPorts = [t3Port, opencodePort, devRelayPort];
 /** How often the sidebar's look at a worktree fetches its base branch, to say how far behind it is. */
 const baseFetchMs = 10 * 60_000;
 /** Provider keys VM Bridge creates: a VM's ID, with a suffix when it starts from a snapshot or checkpoint. */
@@ -133,7 +133,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
   /** When each OpenCode worktree's base branch was last fetched, by `<vmId>/<name>`. */
   private readonly baseFetchedAt = new Map<string, number>();
   /** Previews of dev servers' ports, by the machine they were made on and the port. */
-  private readonly portPreviews = new WeakMap<Box, Map<number, Promise<Preview>>>();
+  private readonly relayPreviews = new WeakMap<Box, Promise<Preview>>();
   private readonly placing = new Map<string, Promise<string>>();
   private readonly locks = new Map<string, Promise<unknown>>();
   private readonly leases = new Map<string, number>();
@@ -1205,41 +1205,34 @@ printf '%s' "$base"`,
   }
 
   /**
-   * A provider preview of the dev server on `port` on an awake VM, through a relay on the VM (see `devRelayProgram`),
-   * or null while the VM sleeps. A preview is kept for the
-   * machine it was made on, which a wake replaces, until a minute before it expires. A page's first load asks for
-   * many files at once, and they share one preview.
+   * A provider preview of the dev server on `port` on an awake VM, through the VM's relay (see `devRelayProgram`), or
+   * null while the VM sleeps or OpenCode never ran on it, as the relay answers only with its password. A preview is
+   * kept for the machine it was made on, which a wake replaces, until a minute before it expires. A page's first load
+   * asks for many files at once, and they share one preview.
    */
   async portPreview(vmId: string, port: number): Promise<Preview | null> {
     const vm = this.store.vm(vmId);
     const box = this.machineReady(vmId) ? this.boxes.get(vmId) : undefined;
-    if (!vm || !box) return null;
-    let previews = this.portPreviews.get(box);
-    if (!previews) {
-      previews = new Map();
-      this.portPreviews.set(box, previews);
+    if (!vm?.opencodePassword || !box) return null;
+    const kept = this.relayPreviews.get(box);
+    let preview = kept ? await kept.catch(() => null) : null;
+    if (!preview || (preview.expiresAt !== undefined && preview.expiresAt - Date.now() < 60_000)) {
+      // Another request may have started a new one while this waited.
+      let making = this.relayPreviews.get(box);
+      if (!making || making === kept) {
+        const driver = this.driver(vm.provider);
+        making = runProgram(box, devRelayProgram, "Relaying dev servers", 15_000).then(() =>
+          driver.preview ? driver.preview(box, devRelayPort) : box.preview(devRelayPort),
+        );
+        const made = making;
+        this.relayPreviews.set(box, made);
+        made.catch(() => {
+          if (this.relayPreviews.get(box) === made) this.relayPreviews.delete(box);
+        });
+      }
+      preview = await making;
     }
-    const kept = previews.get(port);
-    if (kept) {
-      const preview = await kept.catch(() => null);
-      if (preview && (preview.expiresAt === undefined || preview.expiresAt - Date.now() > 60_000)) return preview;
-      if (previews.get(port) === kept) previews.delete(port);
-    }
-    let making = previews.get(port);
-    if (!making) {
-      const driver = this.driver(vm.provider);
-      making = runProgram(box, devRelayProgram(port), "Relaying a dev server", 15_000).then((answer) => {
-        const reachable = Number(answer.trim());
-        if (!Number.isInteger(reachable) || reachable <= 0) throw new Error(`Port ${port} on VM ${vmId} cannot be reached.`);
-        return driver.preview ? driver.preview(box, reachable) : box.preview(reachable);
-      });
-      const made = making;
-      previews.set(port, made);
-      made.catch(() => {
-        if (previews.get(port) === made) previews.delete(port);
-      });
-    }
-    return making;
+    return { ...preview, headers: { ...preview.headers, [devRelayHeaders.port]: String(port), [devRelayHeaders.password]: vm.opencodePassword } };
   }
 
   /**

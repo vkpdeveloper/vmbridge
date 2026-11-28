@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { devRelayScript, findWorktreeProgram, fixWorktreeLinks, listWorktreesProgram, readWorktreeState, removeWorktreeProgram, worktreePath, worktreeStateProgram } from "../src/vm/opencode.ts";
+import { devRelayHeaders, devRelayScript, findWorktreeProgram, fixWorktreeLinks, listWorktreesProgram, readWorktreeState, removeWorktreeProgram, worktreePath, worktreeStateProgram } from "../src/vm/opencode.ts";
 import { quote } from "../src/vm/runtime.ts";
 import { openDatabase } from "../src/bun/sqlite.ts";
 import type { Hub } from "../src/gateway/hub.ts";
@@ -140,13 +140,17 @@ describe("the sidebar's look at a worktree", () => {
 });
 
 describe("relaying a dev server on its VM", () => {
-  test("asks for localhost without the proxy's forwarding headers, and passes WebSockets", async () => {
-    const seen: { host: string | null; forwarded: string | null }[] = [];
+  test("answers only with the VM's password, reaches the named port as localhost, and passes WebSockets", async () => {
+    const seen: { host: string | null; forwarded: string | null; relayHeaders: boolean }[] = [];
     const dev = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
       fetch(request, server) {
-        seen.push({ host: request.headers.get("host"), forwarded: request.headers.get("x-forwarded-host") });
+        seen.push({
+          host: request.headers.get("host"),
+          forwarded: request.headers.get("x-forwarded-host"),
+          relayHeaders: request.headers.has(devRelayHeaders.port) || request.headers.has(devRelayHeaders.password),
+        });
         if (server.upgrade(request)) return;
         return new Response("page");
       },
@@ -154,19 +158,31 @@ describe("relaying a dev server on its VM", () => {
     });
     const dir = mkdtempSync(join(tmpdir(), "vmb-relay-"));
     dirs.push(dir);
-    const file = join(dir, "relay");
-    const relay = Bun.spawn(["node", "-e", devRelayScript, String(dev.port), file], { stdio: ["ignore", "ignore", "inherit"] });
+    const [passwordFile, file] = [join(dir, "password"), join(dir, "relay")];
+    writeFileSync(passwordFile, "secret");
+    const relay = Bun.spawn(["node", "-e", devRelayScript, "0", passwordFile, file], { stdio: ["ignore", "ignore", "inherit"] });
     try {
       let port = "";
       for (let tries = 0; !port && tries < 100; tries++) {
         await Bun.sleep(50);
         port = (await Bun.file(file).exists()) ? (await Bun.file(file).text()).split("\t")[1]! : "";
       }
-      const page = await fetch(`http://127.0.0.1:${port}/`, { headers: { host: "box-3000.provider.dev", "x-forwarded-host": "box-3000.provider.dev" } });
-      expect(await page.text()).toBe("page");
-      expect(seen[0]).toEqual({ host: `localhost:${dev.port}`, forwarded: null });
+      const ask = (headers: Record<string, string>) =>
+        fetch(`http://127.0.0.1:${port}/`, { headers: { host: "box-4797.provider.dev", "x-forwarded-host": "box-4797.provider.dev", ...headers } });
+      expect((await ask({ [devRelayHeaders.port]: String(dev.port) })).status).toBe(403);
+      expect((await ask({ [devRelayHeaders.port]: String(dev.port), [devRelayHeaders.password]: "wrong" })).status).toBe(403);
+      expect((await ask({ [devRelayHeaders.password]: "secret" })).status).toBe(403);
+      expect(seen).toEqual([]);
 
-      const socket = new WebSocket(`ws://127.0.0.1:${port}/hmr`);
+      const allowed = { [devRelayHeaders.port]: String(dev.port), [devRelayHeaders.password]: "secret" };
+      const page = await ask(allowed);
+      expect(await page.text()).toBe("page");
+      expect(seen[0]).toEqual({ host: `localhost:${dev.port}`, forwarded: null, relayHeaders: false });
+
+      const refused = new WebSocket(`ws://127.0.0.1:${port}/hmr`);
+      expect(await new Promise((resolve) => (refused.onerror = () => resolve("refused")))).toBe("refused");
+
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/hmr`, { headers: allowed });
       const answer = await new Promise<string>((resolve, reject) => {
         socket.onopen = () => socket.send("hi");
         socket.onmessage = (event) => resolve(String(event.data));
@@ -174,7 +190,7 @@ describe("relaying a dev server on its VM", () => {
       });
       socket.close();
       expect(answer).toBe("echo hi");
-      expect(seen[1]!.host).toBe(`localhost:${dev.port}`);
+      expect(seen[1]).toEqual({ host: `localhost:${dev.port}`, forwarded: null, relayHeaders: false });
     } finally {
       relay.kill();
       dev.stop(true);

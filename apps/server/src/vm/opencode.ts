@@ -6,6 +6,8 @@ import { previewTarget } from "./backend.ts";
 import { put, quote, root, runProgram, writes } from "./runtime.ts";
 
 export const opencodePort = 4096;
+const dir = `${root}/opencode`;
+const passwordPath = `${dir}/password`;
 
 /**
  * Where `vmbridge opencode` makes a worktree: beside the checkout, under a folder git and the project's own files never
@@ -82,26 +84,45 @@ fi
 done`;
 }
 
+/** The port of the relay to a VM's dev servers (see `devRelayScript`). Providers that open only the ports a VM was made with, such as Railway, need it fixed. */
+export const devRelayPort = 4797;
+/** The request headers that name the dev server's port and carry the VM's OpenCode password to the relay. */
+export const devRelayHeaders = { port: "x-vmbridge-port", password: "x-vmbridge-relay" };
+
 /**
- * An HTTP relay on a free port on every address to `localhost:<port>`, which writes its process ID and port to a file
- * once it listens. It tells the server the request is for `localhost:<port>` and drops the proxy's forwarding headers,
- * as dev servers refuse other hosts (Vite) or check them against the page's origin (Next). WebSockets pass too.
+ * An HTTP relay on every address to the dev server on `localhost:<port>`, where the request's port header names the
+ * port, so one port a provider opens reaches them all. It answers only requests carrying the VM's OpenCode password,
+ * read from the file each time. It tells the server the request is for `localhost:<port>` and drops the proxy's
+ * forwarding headers, as dev servers refuse other hosts (Vite) or check them against the page's origin (Next).
+ * WebSockets pass too. It writes its process ID and port to a file once it listens.
  */
 export const devRelayScript = `const http = require("http");
 const net = require("net");
-const [port, file] = [Number(process.argv[1]), process.argv[2]];
-const host = "localhost:" + port;
-const headers = (raw) => {
+const fs = require("fs");
+const crypto = require("crypto");
+const [listen, passwordFile, file] = [Number(process.argv[1]), process.argv[2], process.argv[3]];
+const digest = (text) => crypto.createHash("sha256").update(String(text)).digest();
+// The dev server's port, or 0 when the request lacks the password or a port.
+const target = (request) => {
+  let password = "";
+  try { password = fs.readFileSync(passwordFile, "utf8"); } catch {}
+  if (!password || !crypto.timingSafeEqual(digest(password), digest(request.headers["${devRelayHeaders.password}"] ?? ""))) return 0;
+  const port = Number(request.headers["${devRelayHeaders.port}"]);
+  return Number.isInteger(port) && port > 0 && port < 65536 ? port : 0;
+};
+const headers = (raw, port) => {
   const kept = [];
   for (let i = 0; i < raw.length; i += 2) {
     const name = raw[i].toLowerCase();
-    if (name === "forwarded" || name.startsWith("x-forwarded-")) continue;
-    kept.push(raw[i], name === "host" ? host : raw[i + 1]);
+    if (name === "forwarded" || name.startsWith("x-forwarded-") || name === "${devRelayHeaders.port}" || name === "${devRelayHeaders.password}") continue;
+    kept.push(raw[i], name === "host" ? "localhost:" + port : raw[i + 1]);
   }
   return kept;
 };
 const server = http.createServer((request, response) => {
-  const upstream = http.request({ host: "localhost", port, method: request.method, path: request.url, headers: headers(request.rawHeaders) }, (answer) => {
+  const port = target(request);
+  if (!port) return response.writeHead(403).end();
+  const upstream = http.request({ host: "localhost", port, method: request.method, path: request.url, headers: headers(request.rawHeaders, port) }, (answer) => {
     response.writeHead(answer.statusCode, answer.rawHeaders);
     answer.pipe(response);
   });
@@ -112,9 +133,11 @@ const server = http.createServer((request, response) => {
   request.pipe(upstream);
 });
 server.on("upgrade", (request, socket, head) => {
+  const port = target(request);
+  if (!port) return socket.end("HTTP/1.1 403 Forbidden\\r\\n\\r\\n");
   const upstream = net.connect({ port, host: "localhost" }, () => {
     const lines = [request.method + " " + request.url + " HTTP/1.1"];
-    const kept = headers(request.rawHeaders);
+    const kept = headers(request.rawHeaders, port);
     for (let i = 0; i < kept.length; i += 2) lines.push(kept[i] + ": " + kept[i + 1]);
     upstream.write(lines.join("\\r\\n") + "\\r\\n\\r\\n");
     upstream.write(head);
@@ -123,22 +146,20 @@ server.on("upgrade", (request, socket, head) => {
   upstream.on("error", () => socket.destroy());
   socket.on("error", () => upstream.destroy());
 });
-server.listen(0, "0.0.0.0", () => require("fs").writeFileSync(file, process.pid + "\\t" + server.address().port));`;
+server.listen(listen, "0.0.0.0", () => fs.writeFileSync(file, process.pid + "\\t" + server.address().port));`;
 
+const devRelayFile = "/tmp/vmbridge-dev-relay";
 /**
- * Prints the port a provider's preview reaches the dev server on `port` through: a relay (see `devRelayScript`), which
- * also reaches a server listening only on loopback, as Vite does by default, where a provider's proxy cannot. It reuses
- * the relay it started before while that runs.
+ * Starts the relay to the VM's dev servers (see `devRelayScript`) unless it runs already. It also reaches a server
+ * listening only on loopback, as Vite does by default, where a provider's proxy cannot.
  */
-export function devRelayProgram(port: number) {
-  const file = `/tmp/vmbridge-dev-relay-${port}`;
-  return `if [ -s ${file} ] && kill -0 "$(cut -f1 ${file})" 2>/dev/null; then cut -f2 ${file}; exit 0; fi
-rm -f ${file}
+export const devRelayProgram = `if [ -s ${devRelayFile} ] && kill -0 "$(cut -f1 ${devRelayFile})" 2>/dev/null; then exit 0; fi
+rm -f ${devRelayFile}
 . ${root}/env
-nohup node -e ${quote(devRelayScript)} ${port} ${file} >/dev/null 2>&1 &
-for _ in $(seq 50); do [ -s ${file} ] && break; sleep 0.1; done
-cut -f2 ${file}`;
-}
+nohup node -e ${quote(devRelayScript)} ${devRelayPort} ${passwordPath} ${devRelayFile} >/dev/null 2>&1 &
+for _ in $(seq 50); do [ -s ${devRelayFile} ] && exit 0; sleep 0.1; done
+echo "The relay to the VM's dev servers did not start." >&2
+exit 1`;
 
 /** Reads what `worktreeStateProgram` printed, or null when the worktree is gone. */
 export function readWorktreeState(output: string): WorktreeState | null {
@@ -185,8 +206,6 @@ git worktree prune
 if pushed . ${branch}; then git branch -D ${quote(`opencode/${name}`)} >/dev/null 2>&1 || true; fi
 printf removed`;
 }
-const dir = `${root}/opencode`;
-const passwordPath = `${dir}/password`;
 const startPath = `${dir}/start.sh`;
 const processName = "opencode";
 
