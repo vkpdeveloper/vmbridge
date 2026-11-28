@@ -11,6 +11,44 @@ const missingMarker = "project-favicon-missing";
 const maxIconBytes = 512 * 1024;
 const t3AssetUrl = /^\/api\/assets\/[\w.-]+\/([^/\\?#\s]+)$/;
 
+async function readBounded(response: Response, limit: number): Promise<Uint8Array<ArrayBuffer> | null> {
+  const declared = response.headers.get("content-length") ?? "";
+  if (/^\d+$/.test(declared) && BigInt(declared) > BigInt(limit)) {
+    void response.body?.cancel().catch(() => {});
+    return null;
+  }
+  if (!response.body) return null;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value.byteLength === 0) continue;
+      total += value.byteLength;
+      if (total > limit) {
+        void reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    void reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+  if (total === 0) return null;
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
 export interface StoredIcon {
   contentType: string;
   /** Hex SHA-256 of the bytes. It names the file in URLs, so only someone who has the logo can make its link. */
@@ -59,9 +97,12 @@ export class ProjectIcons {
       if (this.get(projectId)?.name === name) return;
       const response = await backend.http(relativeUrl);
       const contentType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ?? "";
-      if (!response.ok || !contentType.startsWith("image/")) return;
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength === 0 || bytes.byteLength > maxIconBytes) return;
+      if (!response.ok || !contentType.startsWith("image/")) {
+        void response.body?.cancel().catch(() => {});
+        return;
+      }
+      const bytes = await readBounded(response, maxIconBytes);
+      if (!bytes) return;
       const revision = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
       this.db.run(
         `INSERT INTO project_icons (project_id, content_type, data, revision, name, fetched_at) VALUES (?, ?, ?, ?, ?, ?)

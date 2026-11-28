@@ -97,3 +97,108 @@ test("the dashboard shows the icon T3 would: the one picked in T3, then the logo
   expect(nameIcon("app2-web").text).toBe("A2");
   expect(nameIcon("--").text).toBe("PR");
 });
+
+test("oversized and rejected icon responses are canceled without buffering the whole body", async () => {
+  const { hub, createUrl, fetch, close } = setup();
+  const makeBackend = (name: string, respond: () => Response) =>
+    ({
+      call: async () => ({ relativeUrl: `/api/assets/signed.token/${name}`, expiresAt: 1 }),
+      http: async () => respond(),
+    }) as unknown as Backend;
+
+  // Declared Content-Length over 512 KiB is canceled before pulling any chunk, even if cancel stays pending.
+  let pulledOversizedHeader = 0;
+  let canceledOversizedHeader = false;
+  const oversizedHeaderStream = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        pulledOversizedHeader++;
+        controller.enqueue(new Uint8Array(1024));
+      },
+      cancel() {
+        canceledOversizedHeader = true;
+        return new Promise(() => {});
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  await hub.icons.refresh(
+    projectId,
+    "/workspace/fikrabot",
+    makeBackend(
+      "v1-big-header.png",
+      () => new Response(oversizedHeaderStream, { headers: { "content-type": "image/png", "content-length": String(512 * 1024 + 1) } }),
+    ),
+  );
+  expect(canceledOversizedHeader).toBe(true);
+  expect(pulledOversizedHeader).toBe(0);
+  expect(oversizedHeaderStream.locked).toBe(false);
+  expect((await createUrl())._tag).toBe("Failure");
+
+  // Chunked stream without Content-Length stops as soon as it crosses 512 KiB and releases the reader.
+  let pulledChunks = 0;
+  let canceledStream = false;
+  const chunkedOversized = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulledChunks++;
+      if (pulledChunks > 10) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(new Uint8Array(200 * 1024));
+    },
+    cancel() {
+      canceledStream = true;
+      return new Promise(() => {});
+    },
+  });
+  await hub.icons.refresh(
+    projectId,
+    "/workspace/fikrabot",
+    makeBackend("v2-big-stream.png", () => new Response(chunkedOversized, { headers: { "content-type": "image/png" } })),
+  );
+  expect(canceledStream).toBe(true);
+  expect(pulledChunks).toBeLessThanOrEqual(4);
+  expect(chunkedOversized.locked).toBe(false);
+  expect((await createUrl())._tag).toBe("Failure");
+
+  // Non-image responses cancel their body rather than leaking the stream.
+  let canceledWrongType = false;
+  const wrongTypeStream = new ReadableStream<Uint8Array>({
+    pull() {},
+    cancel() {
+      canceledWrongType = true;
+    },
+  });
+  await hub.icons.refresh(
+    projectId,
+    "/workspace/fikrabot",
+    makeBackend("v3-html.png", () => new Response(wrongTypeStream, { headers: { "content-type": "text/html" } })),
+  );
+  expect(canceledWrongType).toBe(true);
+  expect(wrongTypeStream.locked).toBe(false);
+  expect((await createUrl())._tag).toBe("Failure");
+
+  // A valid multi-chunk icon of exactly 512 KiB (with an empty chunk and non-decimal Content-Length) is reassembled verbatim.
+  const exactLimit = new Uint8Array(512 * 1024);
+  for (let i = 0; i < exactLimit.length; i++) exactLimit[i] = i & 0xff;
+  const parts = [exactLimit.slice(0, 200_000), new Uint8Array(0), exactLimit.slice(200_000)];
+  let idx = 0;
+  const validStream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (idx < parts.length) controller.enqueue(parts[idx++]!);
+      else controller.close();
+    },
+  });
+  await hub.icons.refresh(
+    projectId,
+    "/workspace/fikrabot",
+    makeBackend("v4-exact-limit.png", () => new Response(validStream, { headers: { "content-type": "image/png", "content-length": "0x80001" } })),
+  );
+  const minted = await createUrl();
+  expect(minted._tag).toBe("Success");
+  const served = await fetch(minted.value!.relativeUrl);
+  expect(new Uint8Array(await served.arrayBuffer())).toEqual(exactLimit);
+  expect(validStream.locked).toBe(false);
+  close();
+});
