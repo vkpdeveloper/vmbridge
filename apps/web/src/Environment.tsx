@@ -3,6 +3,17 @@ import { toast } from "sonner";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Add01Icon, Cancel01Icon, Delete02Icon, PencilEdit02Icon } from "@hugeicons/core-free-icons";
 import type { Overview } from "@vmbridge/contracts";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { FieldError } from "@/components/ui/field";
@@ -89,21 +100,38 @@ export function Environment({ overview }: { overview: Overview }) {
                   </TooltipTrigger>
                   <TooltipContent>Change</TooltipContent>
                 </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label={`Remove ${entry}`}
-                      className="text-muted-foreground hover:text-destructive"
-                      disabled={action.busy}
-                      onClick={() => remove(entry)}
-                    >
-                      <HugeiconsIcon icon={Delete02Icon} strokeWidth={1.75} />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Remove</TooltipContent>
-                </Tooltip>
+                <AlertDialog>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <AlertDialogTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={`Remove ${entry}`}
+                          className="text-muted-foreground hover:text-destructive"
+                          disabled={action.busy}
+                        >
+                          <HugeiconsIcon icon={Delete02Icon} strokeWidth={1.75} />
+                        </Button>
+                      </AlertDialogTrigger>
+                    </TooltipTrigger>
+                    <TooltipContent>Remove</TooltipContent>
+                  </Tooltip>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Remove {entry}?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        It comes off every VM once nothing is running on it. If it was a secret, revoke it at its source too.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                      <AlertDialogAction variant="destructive" onClick={() => remove(entry)}>
+                        Remove
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
               </div>
             </div>
           ))}
@@ -149,6 +177,7 @@ export function Environment({ overview }: { overview: Overview }) {
               // The fields stay read-only while a save is pending, so clearing them after it cannot drop a newer draft.
               onSubmit={(event) => {
                 event.preventDefault();
+                if (!key || (exists && value.length === 0)) return;
                 void action.run(() => api(`/env/${encodeURIComponent(key)}`, { method: "PUT", body: { value } })).then((ok) => {
                   if (!ok) return;
                   toast.success(`${key} saved. VMs get it as soon as nothing is running on them.`);
@@ -181,7 +210,7 @@ export function Environment({ overview }: { overview: Overview }) {
                 onChange={(event) => setValue(event.target.value)}
                 onPaste={(event) => pasteMany(event, "value")}
               />
-              <Button type="submit" size="sm" className="h-8 px-3" disabled={action.busy || !key}>
+              <Button type="submit" size="sm" className="h-8 px-3" disabled={action.busy || !key || (exists && value.length === 0)}>
                 {!exists && <HugeiconsIcon icon={Add01Icon} data-icon="inline-start" strokeWidth={2} />}
                 {exists ? "Save" : "Add"}
               </Button>
