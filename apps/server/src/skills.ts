@@ -1,6 +1,6 @@
 import type { Sql } from "./sql.ts";
 import { EventEmitter } from "node:events";
-import { skillNamePattern, skillUploadProblem, type AgentKind, type LocalSkill, type SkillInfo, type SkillSearchResult, type SkillSource } from "@vmbridge/contracts";
+import { skillNamePattern, skillUploadProblem, uploadLimits, type AgentKind, type LocalSkill, type SkillInfo, type SkillSearchResult, type SkillSource } from "@vmbridge/contracts";
 import { Encryption } from "./encryption.ts";
 import { Instructions } from "./instructions.ts";
 import { Settings, type Plaintext } from "./settings.ts";
@@ -45,7 +45,55 @@ const skillsSh = "https://skills.sh";
 const validRepo = /^[\w.-]+\/[\w.-]+$/;
 const base64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
-const isSafePath = (path: string) => !path.startsWith("/") && !path.includes("\\") && path.split("/").every((part) => part && part !== "." && part !== "..");
+// A 1 MB skill can expand up to 6x in JSON when bytes are escaped as \uXXXX, plus path and envelope overhead.
+const maxDownloadBytes = uploadLimits.skillBytes * 6 + 512 * 1024;
+
+function decodeUtf8(bytes: Uint8Array, skillId: string): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (error) {
+    if (error instanceof TypeError) throw new SkillError(`skills.sh sent invalid UTF-8 for ${skillId}.`);
+    throw error;
+  }
+}
+
+async function readBoundedText(response: Response, limit: number, skillId: string): Promise<string> {
+  const rawLength = response.headers.get("content-length");
+  const length = rawLength ? Number(rawLength) : NaN;
+  if (Number.isFinite(length) && length > limit) {
+    await response.body?.cancel().catch(() => {});
+    throw new SkillError(`skills.sh download for ${skillId} is too large.`);
+  }
+  if (!response.body) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > limit) throw new SkillError(`skills.sh download for ${skillId} is too large.`);
+    return decodeUtf8(bytes, skillId);
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel().catch(() => {});
+        throw new SkillError(`skills.sh download for ${skillId} is too large.`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const combined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return decodeUtf8(combined, skillId);
+}
 
 /** The `description` from SKILL.md's front matter, including YAML's folded and literal block forms. */
 export function skillDescription(skillMd: string): string | null {
@@ -162,10 +210,10 @@ export class Skills extends EventEmitter<{ changed: [] }> {
     return [...rows.map((row) => `skill ${row.name}`), ...this.instructions.plaintext(action)];
   }
 
-  private save(name: string, source: SkillSource, ref: string, files: SkillFile[]) {
+  private write(name: string, source: SkillSource, ref: string, files: SkillFile[]) {
     const hash = skillHash(files);
     const existing = this.row(name);
-    if (existing?.hash === hash && existing.ref === ref) return false;
+    if (existing?.source === source && existing.ref === ref && existing.hash === hash) return false;
     const now = Date.now();
     this.db.run(
       `INSERT INTO skills (name, source, ref, description, hash, files, installed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -173,6 +221,11 @@ export class Skills extends EventEmitter<{ changed: [] }> {
            files = excluded.files, updated_at = excluded.updated_at`,
       name, source, ref, describe(files), hash, this.encryption.seal(JSON.stringify(files), `skill:${name}`), now, now,
     );
+    return true;
+  }
+
+  private save(name: string, source: SkillSource, ref: string, files: SkillFile[]) {
+    if (!this.write(name, source, ref, files)) return false;
     this.emit("changed");
     return true;
   }
@@ -189,12 +242,20 @@ export class Skills extends EventEmitter<{ changed: [] }> {
   async search(query: string): Promise<SkillSearchResult[]> {
     const response = await fetch(`${skillsSh}/api/search?${new URLSearchParams({ q: query })}`, { signal: AbortSignal.timeout(15_000) });
     if (!response.ok) throw new Error(`skills.sh answered ${response.status}.`);
-    const { skills } = (await response.json()) as { skills: { source?: string; skillId?: string; name?: string; installs?: number }[] };
-    return skills.flatMap((skill) =>
-      skill.source && validRepo.test(skill.source) && skill.skillId && skillNamePattern.test(skill.skillId)
-        ? [{ source: skill.source, skillId: skill.skillId, name: skill.name ?? skill.skillId, installs: skill.installs ?? 0 }]
-        : [],
-    );
+    const body = (await response.json()) as { skills?: unknown } | null;
+    const skills = Array.isArray(body?.skills) ? body.skills : [];
+    return skills.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") return [];
+      const skill = entry as { source?: unknown; skillId?: unknown; name?: unknown; installs?: unknown };
+      if (typeof skill.source !== "string" || !validRepo.test(skill.source)) return [];
+      if (typeof skill.skillId !== "string" || !skillNamePattern.test(skill.skillId)) return [];
+      return [{
+        source: skill.source,
+        skillId: skill.skillId,
+        name: typeof skill.name === "string" && skill.name ? skill.name : skill.skillId,
+        installs: typeof skill.installs === "number" && Number.isFinite(skill.installs) ? skill.installs : 0,
+      }];
+    });
   }
 
   /** Installs, or updates to what skills.sh has now. Returns whether anything changed. */
@@ -206,16 +267,36 @@ export class Skills extends EventEmitter<{ changed: [] }> {
     const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
     if (response.status === 404) throw new SkillError(`skills.sh has no files for ${source}/${skillId}.`);
     if (!response.ok) throw new Error(`skills.sh answered ${response.status}.`);
-    const download = (await response.json()) as { files?: { path?: unknown; contents?: unknown }[] };
+    const bodyText = await readBoundedText(response, maxDownloadBytes, skillId);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(bodyText);
+    } catch {
+      throw new SkillError(`skills.sh sent an unreadable response for ${skillId}.`);
+    }
+    const rawFiles = parsed && typeof parsed === "object" ? (parsed as { files?: unknown }).files : undefined;
+    if (!Array.isArray(rawFiles)) throw new SkillError(`skills.sh sent an unusable response for ${skillId}.`);
+    if (rawFiles.length > uploadLimits.skillFiles) throw new SkillError(`${skillId} has more than ${uploadLimits.skillFiles} files.`);
     const files: SkillFile[] = [];
-    for (const file of download.files ?? []) {
-      if (typeof file.path !== "string" || typeof file.contents !== "string" || !isSafePath(file.path)) {
+    const sizes: { path: string; size: number }[] = [];
+    for (const entry of rawFiles) {
+      if (!entry || typeof entry !== "object") throw new SkillError(`skills.sh sent an unusable file for ${skillId}.`);
+      const { path, contents } = entry as { path?: unknown; contents?: unknown };
+      if (typeof path !== "string" || typeof contents !== "string") {
         throw new SkillError(`skills.sh sent an unusable file for ${skillId}.`);
       }
-      files.push({ path: file.path, data: Buffer.from(file.contents).toString("base64") });
+      const buf = Buffer.from(contents, "utf8");
+      files.push({ path, data: buf.toString("base64") });
+      sizes.push({ path, size: buf.byteLength });
     }
-    if (!files.some((file) => file.path === "SKILL.md")) throw new SkillError(`skills.sh sent no SKILL.md for ${skillId}.`);
-    return this.save(skillId, "skills.sh", source, files);
+    const problem = skillUploadProblem(skillId, sizes);
+    if (problem) throw new SkillError(problem);
+    const changed = this.db.transaction(() => {
+      this.claim(skillId, "skills.sh", source);
+      return this.write(skillId, "skills.sh", source, files);
+    });
+    if (changed) this.emit("changed");
+    return changed;
   }
 
   async update(name: string) {
