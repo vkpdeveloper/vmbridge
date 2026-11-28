@@ -65,11 +65,27 @@ describe("removing a vmbridge opencode worktree", () => {
     expect(remove()).toBe("removed");
   });
 
+  test("stays while its own branch has commits that are not pushed, after an agent switched away from it", () => {
+    const { checkout, path, commit, remove } = setUp("ab12cd34");
+    commit("work");
+    sh("git switch --quiet -c fix/other origin/main", path);
+    expect(remove()).toBe("kept fix/other");
+    expect(branches(checkout)).toContain("opencode/ab12cd34");
+  });
+
   test("tidies a worktree whose folder is already gone", () => {
     const { checkout, path, remove } = setUp("ab12cd34");
     rmSync(path, { recursive: true });
     expect(remove()).toBe("removed");
     expect(branches(checkout)).toEqual(["main"]);
+  });
+
+  test("keeps the branch of a worktree whose folder is gone while it has commits that are not pushed", () => {
+    const { checkout, path, commit, remove } = setUp("ab12cd34");
+    commit("work");
+    rmSync(path, { recursive: true });
+    expect(remove()).toBe("removed");
+    expect(branches(checkout)).toContain("opencode/ab12cd34");
   });
 });
 

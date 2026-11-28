@@ -58,16 +58,22 @@ done`;
  */
 export function removeWorktreeProgram(checkout: string, name: string) {
   const path = quote(worktreePath(checkout, name));
+  const branch = quote(`refs/heads/opencode/${name}`);
   const keep = `{ printf 'kept %s' "$(git -C ${path} branch --show-current)"; exit 0; }`;
-  return `cd ${quote(checkout)}
+  // Work counts as safe only when git says so: a check git cannot run keeps the worktree.
+  return `pushed() { local ahead; ahead="$(git -C "$1" rev-list -1 "$2" --not --remotes 2>/dev/null)" && [ -z "$ahead" ]; }
+cd ${quote(checkout)}
 if [ -d ${path} ]; then
   ${fixWorktreeLinks(quote(checkout), path)}
-  [ -z "$(git -C ${path} status --porcelain)" ] || ${keep}
-  [ -z "$(git -C ${path} rev-list -1 HEAD --not --remotes)" ] || ${keep}
+  status="$(git -C ${path} status --porcelain)" && [ -z "$status" ] || ${keep}
+  pushed ${path} HEAD || ${keep}
+  ! git show-ref -q --verify ${branch} || pushed . ${branch} || ${keep}
   git worktree remove --force ${path}
 fi
 git worktree prune
-git branch -D ${quote(`opencode/${name}`)} >/dev/null 2>&1 || true
+# Its branch goes only once a remote has all of it, so commits left there when an agent switched away, or when the
+# folder went first, stay in the checkout.
+if pushed . ${branch}; then git branch -D ${quote(`opencode/${name}`)} >/dev/null 2>&1 || true; fi
 printf removed`;
 }
 const dir = `${root}/opencode`;
