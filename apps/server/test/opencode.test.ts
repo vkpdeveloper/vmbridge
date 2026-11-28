@@ -25,13 +25,14 @@ const vm = Bun.serve({
     const url = new URL(request.url);
     asked.push({ path: url.pathname + url.search, headers: request.headers });
     if (url.pathname === "/api/event") {
-      // Two of OpenCode's events, the first split across chunks.
+      // Two of OpenCode's events, the first split across chunks. With `hold`, the stream stays open after them.
       const chunks = ['data: {"id":"evt_1","type":"server.', 'connected","data":{}}\n\n', 'data: {"id":"evt_2","type":"x","data":{}}\n\n'];
       return new Response(
         new ReadableStream({
           async pull(controller) {
             const chunk = chunks.shift();
             if (chunk) controller.enqueue(new TextEncoder().encode(chunk));
+            else if (url.searchParams.has("hold")) await new Promise((resolve) => request.signal.addEventListener("abort", resolve));
             else controller.close();
           },
         }),
@@ -341,13 +342,74 @@ describe("OpenCode gateway", () => {
     expect(asked).toEqual([]);
   });
 
-  test("an event stream does not wake a sleeping VM", async () => {
+  test("an event stream connects at once to a sleeping VM's project without waking it", async () => {
     const { gateway, calls } = setup({ awake: false });
-    const response = await send(gateway, "/opencode/p1/api/event", { headers: { authorization: basic(projectPassword) } });
-    expect(response.status).toBe(503);
-    expect(response.headers.get("retry-after")).toBe("10");
+    const controller = new AbortController();
+    const response = await send(gateway, "/opencode/p1/api/event", { headers: { authorization: basic(projectPassword) }, signal: controller.signal });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/event-stream");
+    const first = await response.body!.getReader().read();
+    expect(JSON.parse(new TextDecoder().decode(first.value).slice("data: ".length))).toMatchObject({ type: "server.connected", data: {} });
     expect(calls.place).toEqual([]);
     expect(calls.wake).toBe(0);
+    expect(asked).toEqual([]);
+    controller.abort();
+  });
+
+  test("an event stream stays open while its VM sleeps, and gets OpenCode's events before the prompt that wakes it", async () => {
+    const { gateway, store } = setup({ awake: false });
+    store.setCheckout("p1", "vm1", "/workspace/app");
+    const fleet = (gateway as unknown as { fleet: EventEmitter & { machineReady(): boolean } }).fleet;
+    const auth = { authorization: basic(projectPassword) };
+    const controller = new AbortController();
+    const response = await send(gateway, "/opencode/p1/api/event?hold", { headers: auth, signal: controller.signal });
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    // A read still waiting when `readFor` stops gets the next chunk, so it is kept for the next call.
+    let reading: ReturnType<typeof reader.read> | null = null;
+    /** What the client got after `ms`, and whether its stream ended. */
+    const readFor = async (ms: number) => {
+      const until = Bun.sleep(ms).then(() => null);
+      for (;;) {
+        reading ??= reader.read();
+        const next = await Promise.race([reading, until]);
+        if (!next) return false;
+        reading = null;
+        if (next.done) return true;
+        text += decoder.decode(next.value);
+      }
+    };
+    const prompt = () => send(gateway, "/opencode/p1/api/session/ses_1/prompt", { method: "POST", headers: auth, body: JSON.stringify({ parts: [{ type: "text", text: "hi" }] }) });
+
+    expect((await prompt()).status).toBe(200);
+    expect(asked.map((entry) => entry.path.split("?")[0])).toEqual(["/api/event", "/api/session/ses_1/prompt"]);
+    expect(await readFor(50)).toBe(false);
+    // VM Bridge's own `server.connected` and none of OpenCode's, then OpenCode's toast and events.
+    expect(text.match(/server\.connected/g)).toHaveLength(1);
+    expect(text).toContain("tui.toast.show");
+    expect(text).toContain('"id":"evt_2"');
+
+    // Asleep: the client's stream stays open, and the next prompt joins it to OpenCode again before it is sent.
+    asked = [];
+    text = "";
+    fleet.emit("offline", "vm1");
+    expect(await readFor(50)).toBe(false);
+    expect((await prompt()).status).toBe(200);
+    expect(asked.map((entry) => entry.path.split("?")[0])).toEqual(["/api/event", "/api/session/ses_1/prompt"]);
+    expect(await readFor(50)).toBe(false);
+    expect(text).toBe('data: {"id":"evt_2","type":"x","data":{}}\n\n');
+
+    // A new password ends it.
+    gateway.disconnect("p1");
+    expect(await readFor(50)).toBe(true);
+  });
+
+  test("an event stream whose OpenCode stops while the VM is awake ends, so the client loads again", async () => {
+    const { gateway } = setup();
+    const response = await send(gateway, "/opencode/p1/api/event", { headers: { authorization: basic(projectPassword) } });
+    // The test VM's stream ends after two events.
+    expect(await response.text()).toContain('"id":"evt_2"');
   });
 
   test("an event stream the client gave up on while OpenCode started keeps the server, so the client's next try connects", async () => {
@@ -379,12 +441,11 @@ describe("OpenCode gateway", () => {
       ["/opencode/p1/w/vm1/ab12cd34/api/event", "/workspace/.worktrees/app/ab12cd34"],
     ] as const) {
       const frames = (await (await send(gateway, path, auth)).text()).split("\n\n").filter(Boolean);
-      expect(frames.filter((frame) => !frame.includes("tui.toast.show"))).toEqual([
-        'data: {"id":"evt_1","type":"server.connected","data":{}}',
-        'data: {"id":"evt_2","type":"x","data":{}}',
-      ]);
+      expect(frames).toHaveLength(3);
+      expect(JSON.parse(frames[0]!.slice("data: ".length))).toMatchObject({ type: "server.connected", data: {} });
+      expect(frames[2]).toBe('data: {"id":"evt_2","type":"x","data":{}}');
       const toast = frames.findIndex((frame) => frame.includes("tui.toast.show"));
-      expect(toast).toBeGreaterThan(0);
+      expect(toast).toBe(1);
       const event = JSON.parse(frames[toast]!.slice("data: ".length));
       expect(event.id).toStartWith("evt_");
       expect(event.location).toEqual({ directory });

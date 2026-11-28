@@ -164,35 +164,44 @@ function preflight(request: Request) {
   });
 }
 
-const endsEvent = (chunk: Uint8Array) => chunk.length >= 2 && chunk[chunk.length - 2] === 10 && chunk[chunk.length - 1] === 10;
+/**
+ * OpenCode's clients want `server.connected` first, within 2 seconds, and reconnect after 45 seconds without a byte.
+ * Reconnecting drops everything they loaded, and loading it again would wake a sleeping VM.
+ */
+const heartbeatMs = 15_000;
+/** How long a request waits for the event streams held for its VM to reach OpenCode, so they miss none of its events. */
+const attachWaitMs = 5_000;
+
+const eventFrame = (event: object) => `data: ${JSON.stringify({ id: `evt_${randomBytes(12).toString("hex")}`, ...event })}\n\n`;
 
 /**
  * OpenCode's terminal app shows a `tui.toast.show` event as a toast when it names the folder the app works in. One goes
- * into each event stream after OpenCode's first event, so the app says which VM it runs on. It goes in only where a
- * chunk ends an event, so it never splits one of OpenCode's.
+ * into each event stream once it reaches OpenCode, so the app says which VM it runs on.
  */
-export function withToast(response: Response, directory: string, message: string): Response {
-  if (!response.body || !response.headers.get("content-type")?.startsWith("text/event-stream")) return response;
-  const event = {
-    id: `evt_${randomBytes(12).toString("hex")}`,
-    created: Date.now(),
-    type: "tui.toast.show",
-    location: { directory },
-    data: { title: "VM Bridge", message, variant: "info", duration: 5_000 },
-  };
-  const frame = new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
-  let pending = true;
-  const body = response.body.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        controller.enqueue(chunk);
-        if (!pending || !endsEvent(chunk)) return;
-        pending = false;
-        controller.enqueue(frame);
-      },
-    }),
-  );
-  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+const toastFrame = (directory: string, message: string) =>
+  eventFrame({ created: Date.now(), type: "tui.toast.show", location: { directory }, data: { title: "VM Bridge", message, variant: "info", duration: 5_000 } });
+
+/** An event stream's frames, each a whole event, so nothing VM Bridge adds can land inside one. */
+async function* frames(body: ReadableStream<Uint8Array>) {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for await (const chunk of body) {
+    buffer += decoder.decode(chunk, { stream: true }).replaceAll("\r\n", "\n");
+    for (let end = buffer.indexOf("\n\n"); end >= 0; end = buffer.indexOf("\n\n")) {
+      yield buffer.slice(0, end + 2);
+      buffer = buffer.slice(end + 2);
+    }
+  }
+}
+
+/** An OpenCode event stream VM Bridge holds for a client, across its VM's sleeps. */
+interface HeldStream {
+  projectId: string;
+  vmId: string;
+  attached(): boolean;
+  /** Resolves once the stream gets the VM's events, or has closed because it could not. */
+  attach(server: OpenCodeServer): Promise<void>;
+  close(): void;
 }
 
 /** Resolves to null when `promise` takes longer than `ms`. It keeps running, and a late failure is not unhandled. */
@@ -225,6 +234,7 @@ export class OpenCodeGateway {
   /** Aborted as a VM goes offline, ending every request and event stream open to its OpenCode. */
   private readonly ends = new Map<string, AbortController>();
   private readonly relays = new Set<{ vmId: string; end: (code: number, reason: string) => void }>();
+  private readonly held = new Set<HeldStream>();
   private readonly touched = new Map<string, number>();
   /** When each worktree's use was last noted, by `<project>/<name>`. */
   private readonly worktreeUses = new Map<string, number>();
@@ -267,6 +277,7 @@ export class OpenCodeGateway {
     const project = this.store.project(projectId);
     const vmId = project && primaryVm(project)?.vmId;
     if (vmId) this.end(vmId, "The password changed");
+    for (const stream of this.held) if (stream.projectId === projectId) stream.close();
     for (const [code, pairing] of this.pairings) if (pairing.projectId === projectId) this.pairings.delete(code);
   }
 
@@ -423,10 +434,18 @@ export class OpenCodeGateway {
       if (!checkout) return notFound();
       folder = worktreePath(checkout, target.worktree.name);
     }
-    // Neither wakes a sleeping VM: a ticket comes from a VM that was awake, and an idle client reopens its event stream
-    // on its own, which would wake the VM again each time it slept.
-    const waking = signedIn && !(request.method === "GET" && pathname === "/api/event");
     const known = target.worktree?.vmId ?? primaryVm(project)?.vmId;
+    const events = request.method === "GET" && pathname === "/api/event";
+    if (events && known) {
+      if (target.worktree) this.noteUse(project.id, target.worktree.name, request, pathname);
+      const vm = this.store.vm(known);
+      const directory = folder ?? project.vms.find((entry) => entry.vmId === known)?.checkoutPath;
+      const toast = vm && directory ? toastFrame(directory, `Running on ${vm.name} (${providers[vm.provider].label})`) : null;
+      seen.vmId = known;
+      return this.holdEvents(request, project.id, known, target.path, toast);
+    }
+    // Neither wakes a sleeping VM: a ticket comes from a VM that was awake, and an event stream is held while it sleeps.
+    const waking = signedIn && !events;
     let ready: Promise<{ vmId: string; server: OpenCodeServer }>;
     if (waking) ready = target.worktree ? this.wakeVm(target.worktree.vmId) : this.wake(project.id);
     else if (known && this.fleet.machineReady(known)) ready = this.fleet.opencode(known).then((server) => ({ vmId: known, server }));
@@ -443,6 +462,9 @@ export class OpenCodeGateway {
     seen.vmId = vmId;
     if (target.worktree) this.noteUse(project.id, target.worktree.name, request, pathname);
     const path = folder ? this.atWorktree(target.path, request.method, folder) : target.path;
+    // A prompt that woke the VM makes events the clients' held streams must see, so they reach OpenCode first.
+    const waiting = [...this.held].filter((stream) => stream.vmId === vmId && !stream.attached()).map((stream) => stream.attach(server));
+    if (waiting.length > 0) await within(Promise.all(waiting), attachWaitMs);
     if (upgrade) {
       const open = () =>
         server.socket(path).catch((error: unknown) => {
@@ -451,12 +473,95 @@ export class OpenCodeGateway {
         });
       return this.socket(request, relay, vmId, open, seen);
     }
-    const response = await this.forward(request, vmId, server, path, seen);
-    // The app works in the worktree, or else in the folder OpenCode started in on the VM: its checkout.
-    const directory = folder ?? project.vms.find((entry) => entry.vmId === vmId)?.checkoutPath;
-    const vm = this.store.vm(vmId);
-    if (request.method !== "GET" || pathname !== "/api/event" || !response.ok || !directory || !vm) return response;
-    return withToast(response, directory, `Running on ${vm.name} (${providers[vm.provider].label})`);
+    return this.forward(request, vmId, server, path, seen);
+  }
+
+  /**
+   * OpenCode's event stream, which VM Bridge answers itself and holds while the VM sleeps, sending heartbeats as
+   * OpenCode does. A dropped stream would show "Connection lost" and reload everything, which would wake the VM after
+   * each sleep. The stream starts with VM Bridge's own `server.connected` and gets OpenCode's events whenever OpenCode
+   * runs: at once on an awake VM, else once a request wakes it or the VM is awake at a heartbeat.
+   */
+  private holdEvents(request: Request, projectId: string, vmId: string, path: string, toast: string | null): Response {
+    const encoder = new TextEncoder();
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let closed = false;
+    /** Ends the VM's stream while this one gets it. */
+    let upstream: AbortController | null = null;
+    let attaching: Promise<void> | null = null;
+    const send = (text: string) => {
+      if (!closed) controller?.enqueue(encoder.encode(text));
+    };
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      upstream?.abort();
+      this.held.delete(stream);
+      // Already closed when the client went away first.
+      try {
+        controller?.close();
+      } catch {}
+    };
+    const connect = async (server: OpenCodeServer) => {
+      const ending = new AbortController();
+      const slept = this.endSignal(vmId);
+      const signal = AbortSignal.any([request.signal, ending.signal]);
+      const response = await this.forward(new Request(request.url, { headers: request.headers, signal }), vmId, server, path, {}).catch(() => null);
+      const events = response?.ok && response.body ? frames(response.body)[Symbol.asyncIterator]() : null;
+      const first = await events?.next().catch(() => null);
+      // Without OpenCode's events, the client reloads from a stream of its own.
+      if (!events || !first || first.done || closed) return close();
+      upstream = ending;
+      // The client had VM Bridge's own `server.connected`, and a second could make it start over.
+      if (!first.value.includes('"type":"server.connected"')) send(first.value);
+      if (toast) send(toast);
+      toast = null;
+      void (async () => {
+        try {
+          for (let next = await events.next(); !next.done && !closed; next = await events.next()) send(next.value);
+        } catch {}
+        upstream = null;
+        // Past the VM's sleep, the client keeps its stream. Ended any other way, as OpenCode stopping, it may have
+        // missed events, so it reconnects and loads again.
+        if (!slept.aborted) close();
+      })();
+    };
+    const attach = (server: OpenCodeServer) => {
+      if (closed || upstream) return Promise.resolve();
+      attaching ??= connect(server).finally(() => (attaching = null));
+      return attaching;
+    };
+    // Awake without a request from this client, as for T3, it gets OpenCode's events too. Never woken from here.
+    const join = () => {
+      if (!closed && !upstream && !attaching && this.fleet.machineReady(vmId)) void this.fleet.opencode(vmId).then(attach, () => {});
+    };
+    const heartbeat = setInterval(() => {
+      if (upstream || attaching) return;
+      if (!this.store.vm(vmId)) return close();
+      send(": heartbeat\n\n");
+      join();
+    }, heartbeatMs);
+    const stream: HeldStream = { projectId, vmId, attached: () => upstream !== null, attach, close };
+    this.held.add(stream);
+    request.signal.addEventListener("abort", close, { once: true });
+    const body = new ReadableStream<Uint8Array>({
+      start: (started) => {
+        controller = started;
+        send(eventFrame({ type: "server.connected", data: {} }));
+        join();
+      },
+      cancel: close,
+    });
+    const origin = request.headers.get("origin");
+    return new Response(body, {
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache, no-transform",
+        "x-accel-buffering": "no",
+        ...(origin ? { "access-control-allow-origin": origin, vary: "Origin" } : {}),
+      },
+    });
   }
 
   /**
