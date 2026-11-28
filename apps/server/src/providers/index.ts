@@ -13,6 +13,7 @@ import { boxdWeb, useBoxdWeb } from "./boxd-web.ts";
 import { daytonaProvider } from "./daytona.ts";
 import { e2bProvider } from "./e2b.ts";
 import { kubiProvider } from "./kubi.ts";
+import { sleep } from "../runtime.ts";
 import { notFound, retryNotFound, sdkDriver } from "./sdk.ts";
 import { required, type Box, type ProviderDefinition } from "./types.ts";
 
@@ -44,12 +45,35 @@ async function boxdRoute(proxies: BoxdProxies, machine: string, port: number) {
   const name = `port-${port}`;
   const find = async () => (await proxies.list(machine)).find((proxy) => proxy.name === name);
   let route = await find();
+  let made = false;
   if (!route) {
     await proxies.create(machine, name, port);
     route = await find();
+    made = true;
   }
   if (!route) throw new Error(`boxd made no route to port ${port}.`);
-  return { url: `https://${route.domain}` };
+  const url = `https://${route.domain}`;
+  if (made) await reachable(url);
+  return { url };
+}
+
+/**
+ * A new boxd route takes up to about 20 seconds before requests reach it at all. Any answer, even an error for a port
+ * nothing listens on yet, means it is in place. Gives up after a minute and leaves the caller to fail as before.
+ */
+async function reachable(url: string) {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const answered = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(5000) }).then(
+      async (response) => {
+        await response.body?.cancel();
+        return true;
+      },
+      () => false,
+    );
+    if (answered) return;
+    await sleep(500);
+  }
 }
 
 /** boxd over grpc-js, through the SDK's boxd adapter. The default on Bun. */

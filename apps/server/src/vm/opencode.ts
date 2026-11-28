@@ -3,10 +3,10 @@ import type { Preview } from "@opencoredev/sandbox-sdk";
 import type { Box } from "../providers/index.ts";
 import type { OpenSocket } from "../runtime.ts";
 import { previewTarget } from "./backend.ts";
-import { put, quote, root, runProgram, writes } from "./runtime.ts";
+import { installOpenCodeCli, openCodeCli, openCodeDir, put, quote, root, runProgram, writes } from "./runtime.ts";
 
 export const opencodePort = 4096;
-const dir = `${root}/opencode`;
+const dir = openCodeDir;
 const passwordPath = `${dir}/password`;
 
 /**
@@ -208,14 +208,6 @@ printf removed`;
 }
 const startPath = `${dir}/start.sh`;
 const pidPath = `${dir}/server.pid`;
-/**
- * OpenCode's clients speak its 2.x API, which npm ships as @opencode/cli. npm's opencode-ai is the 1.x line, which
- * T3's own OpenCode agent keeps using, so this one gets its own folder.
- */
-export const cliVersion = "2.4.2";
-const cliPrefix = `${dir}/cli`;
-const cli = `${cliPrefix}/bin/opencode`;
-const installCli = `${cli} --version 2>/dev/null | grep -qxF "opencode v${cliVersion}" || npm install -g --prefix ${cliPrefix} --no-audit --no-fund --loglevel=error @opencode/cli@${cliVersion} >&2`;
 
 // Its data, state and cache live apart from the OpenCode that T3 runs, and from what a 1.x server here left. Its config
 // does not: the skills sync writes OpenCode's instructions to the usual config folder, and the env file sets
@@ -226,7 +218,7 @@ set -euo pipefail
 OPENCODE_PASSWORD="$(cat ${passwordPath})"
 export OPENCODE_PASSWORD XDG_DATA_HOME=${dir}/v2/data XDG_STATE_HOME=${dir}/v2/state XDG_CACHE_HOME=${dir}/v2/cache
 cd "$1"
-exec ${cli} serve --hostname 0.0.0.0 --port ${opencodePort}
+exec ${openCodeCli} serve --hostname 0.0.0.0 --port ${opencodePort}
 `;
 
 /**
@@ -295,7 +287,7 @@ export async function startOpenCode(box: Box, password: string, cwd: string, det
         writes({ [passwordPath]: password, [startPath]: startScript }),
         `. ${root}/env`,
         `[ -n "\${OPENCODE_API_KEY:-}" ] || { echo nokey; exit 0; }`,
-        installCli,
+        installOpenCodeCli,
         // In a subshell, as it exits once nothing listens.
         `case "$(${probe})" in idle|busy) echo up; exit 0 ;; down) ;; *) (\n${stopScript}\n) ;; esac`,
         `setsid nohup bash -c 'echo $$ > ${pidPath}; exec bash ${startPath} "$1"' _ ${quote(cwd)} > ${dir}/server.log 2>&1 < /dev/null &`,

@@ -6,7 +6,8 @@ import { providers } from "../providers/index.ts";
 import { primaryVm, type Store } from "../store.ts";
 import type { Traffic } from "../traffic.ts";
 import { previewTarget } from "../vm/backend.ts";
-import { cliVersion, NoOpenCodeKey, OpenCodeUnreachable, worktreeName, worktreePath, type OpenCodeServer } from "../vm/opencode.ts";
+import { openCodeCliVersion } from "../vm/runtime.ts";
+import { NoOpenCodeKey, OpenCodeUnreachable, worktreeName, worktreePath, type OpenCodeServer } from "../vm/opencode.ts";
 import type { Viewer, WatchUpgrade } from "../watch/watch.ts";
 import { previewRelay } from "./preview.ts";
 import { githubName } from "./repos.ts";
@@ -29,7 +30,7 @@ const retryAfterSeconds = 10;
 const infoWaitMs = 3_000;
 const wakingInfo = () =>
   Response.json(
-    { version: cliVersion, pid: 0, hostname: "VM Bridge", urls: [], paths: { tmp: "/tmp/opencode" }, capabilities: { persistentPty: true } },
+    { version: openCodeCliVersion, pid: 0, hostname: "VM Bridge", urls: [], paths: { tmp: "/tmp/opencode" }, capabilities: { persistentPty: true } },
     { headers: { "cache-control": "no-store" } },
   );
 /** Typing in a terminal counts as activity, but the VM's row is written at most this often for it. */

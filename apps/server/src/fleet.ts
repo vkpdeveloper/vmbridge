@@ -134,6 +134,8 @@ export class Fleet extends EventEmitter<FleetEvents> {
   private readonly openCodeWakes = new Set<string>();
   /** Machines woken from a sleep that ends their processes, so nothing of OpenCode runs there until VM Bridge starts it. */
   private readonly restarted = new WeakSet<Box>();
+  /** OpenCode's preview, asked for as a wake for OpenCode starts: a new boxd route takes many seconds to answer. */
+  private readonly openCodePreviews = new WeakMap<Box, Promise<Preview>>();
   /** When each OpenCode worktree's base branch was last fetched, by `<vmId>/<name>`. */
   private readonly baseFetchedAt = new Map<string, number>();
   /** Previews of the relay to dev servers' ports (see `portPreview`), by the machine they were made on. */
@@ -558,6 +560,11 @@ export class Fleet extends EventEmitter<FleetEvents> {
     const credentials = await this.credentials(vm.provider);
     const fingerprint = credentialsFingerprint(credentials, this.store.encryption);
     this.emit("wakeDetail", vm.id, "Preparing the VM");
+    if (this.openCodeWakes.has(vm.id)) {
+      const preview = this.openCodePreview(vm.provider, box);
+      preview.catch(() => {});
+      this.openCodePreviews.set(box, preview);
+    }
     // Woken for OpenCode on a VM it ran on before, so its files and sign-ins are there: it starts beside the preparing.
     const early = this.openCodeWakes.has(vm.id) && vm.opencodePassword && !this.opencodes.has(vm.id) ? this.openCodeFlight(vm.id, () => {}, box) : undefined;
     const [setup, preview] = await Promise.all([prepareVm(box, version, credentials, fingerprint), box.preview(t3Port)]);
@@ -831,6 +838,11 @@ export class Fleet extends EventEmitter<FleetEvents> {
     return this.opencodes.get(vmId) ?? this.openCodeFlight(vmId, detail);
   }
 
+  private openCodePreview(provider: ProviderId, box: Box) {
+    const driver = this.driver(provider);
+    return driver.preview ? driver.preview(box, opencodePort) : box.preview(opencodePort);
+  }
+
   /** Starts OpenCode on the VM, or on `box` while it wakes, noted so later requests share it. A failed start is dropped. */
   private openCodeFlight(vmId: string, detail: (text: string) => void, box?: Box) {
     // Not under the VM's lock, which a wake holds until T3 answers. The lease keeps the VM from sleeping or restarting.
@@ -883,8 +895,9 @@ export class Fleet extends EventEmitter<FleetEvents> {
     const password = vm.opencodePassword ?? newToken();
     if (!vm.opencodePassword) this.store.updateVm(vmId, { opencodePassword: password });
     const started = performance.now();
-    const driver = this.driver(vm.provider);
-    const preview = driver.preview ? driver.preview(box, opencodePort) : box.preview(opencodePort);
+    // Asked for once: a preview can expire, and a server made later asks again.
+    const preview = this.openCodePreviews.get(box) ?? this.openCodePreview(vm.provider, box);
+    this.openCodePreviews.delete(box);
     preview.catch(() => {});
     try {
       // OpenCode outlives VM Bridge, so after a restart it may run already: one request through the preview says so,
