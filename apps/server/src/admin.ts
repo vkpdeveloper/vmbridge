@@ -37,7 +37,7 @@ import { SkillError, type Skills } from "./skills.ts";
 import type { Store, VmRow } from "./store.ts";
 import type { Traffic } from "./traffic.ts";
 import type { Usage } from "./usage.ts";
-import type { Budget } from "./budget.ts";
+import { parseBudgetUpdate, type Budget } from "./budget.ts";
 import { envNameProblem, envValueProblem } from "./vm/runtime.ts";
 import type { SkillsState } from "./vm/skills.ts";
 import type { Stats } from "./vm/stats.ts";
@@ -233,15 +233,9 @@ export class Admin {
       return json(this.deps.usage.report(from, to));
     }
     if (path === "/budget" && method === "PUT") {
-      const input = await body(request);
-      const current = settings.get("budget");
-      let monthlyUsd = current.monthlyUsd;
-      if (input.monthlyUsd !== undefined) {
-        monthlyUsd = input.monthlyUsd === null ? null : Number(input.monthlyUsd);
-        if (monthlyUsd !== null && !(Number.isFinite(monthlyUsd) && monthlyUsd > 0 && monthlyUsd <= 1_000_000)) throw new BadRequest("Enter a budget above $0, or leave it empty for none.");
-      }
-      if (input.stopAtLimit !== undefined && typeof input.stopAtLimit !== "boolean") throw new BadRequest("Say whether to stop at the budget.");
-      settings.set("budget", { monthlyUsd, stopAtLimit: input.stopAtLimit ?? current.stopAtLimit });
+      const updated = parseBudgetUpdate(settings.get("budget"), await body(request));
+      if (!updated.ok) throw new BadRequest(updated.error);
+      settings.set("budget", updated.value);
       fleet.emit("changed");
       return json(this.deps.budget.status());
     }

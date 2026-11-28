@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { openDatabase } from "../src/bun/sqlite.ts";
-import { Budget, monthStart } from "../src/budget.ts";
+import { Budget, monthStart, parseBudgetUpdate } from "../src/budget.ts";
 import { Settings } from "../src/settings.ts";
 import { Store } from "../src/store.ts";
 import { Usage } from "../src/usage.ts";
@@ -86,5 +86,19 @@ describe("monthly budget", () => {
     expect(budget.status(later).level).toBe("warning");
     expect(budget.notice(later)).toBe("VM Bridge: 86% of this month's $1.00 budget is used.");
     expect(budget.notice(later + hour)).toBeNull();
+  });
+
+  test("parseBudgetUpdate resets stopAtLimit when the budget is cleared and refuses turning it on without a budget", () => {
+    const cleared = parseBudgetUpdate({ monthlyUsd: 50, stopAtLimit: true }, { monthlyUsd: null });
+    expect(cleared).toEqual({ ok: true, value: { monthlyUsd: null, stopAtLimit: false } });
+
+    const reset = parseBudgetUpdate({ monthlyUsd: null, stopAtLimit: false }, { monthlyUsd: 10 });
+    expect(reset).toEqual({ ok: true, value: { monthlyUsd: 10, stopAtLimit: false } });
+
+    const withoutLimit = parseBudgetUpdate({ monthlyUsd: null, stopAtLimit: false }, { stopAtLimit: true });
+    expect(withoutLimit).toEqual({ ok: true, value: { monthlyUsd: null, stopAtLimit: false } });
+
+    expect(parseBudgetUpdate({ monthlyUsd: 50, stopAtLimit: false }, { monthlyUsd: 0 })).toMatchObject({ ok: false });
+    expect(parseBudgetUpdate({ monthlyUsd: 50, stopAtLimit: false }, { stopAtLimit: "yes" })).toMatchObject({ ok: false });
   });
 });

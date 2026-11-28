@@ -2,6 +2,30 @@ import type { BudgetStatus, Estimate } from "@vmbridge/contracts";
 import type { Settings } from "./settings.ts";
 import type { Usage } from "./usage.ts";
 
+export interface BudgetSetting {
+  monthlyUsd: number | null;
+  stopAtLimit: boolean;
+}
+
+/** Validates a `PUT /budget` payload and clears `stopAtLimit` whenever no monthly budget is set. */
+export function parseBudgetUpdate(
+  current: BudgetSetting,
+  input: Record<string, unknown>,
+): { ok: true; value: BudgetSetting } | { ok: false; error: string } {
+  let monthlyUsd = current.monthlyUsd;
+  if (input.monthlyUsd !== undefined) {
+    monthlyUsd = input.monthlyUsd === null ? null : Number(input.monthlyUsd);
+    if (monthlyUsd !== null && !(Number.isFinite(monthlyUsd) && monthlyUsd > 0 && monthlyUsd <= 1_000_000)) {
+      return { ok: false, error: "Enter a budget above $0, or leave it empty for none." };
+    }
+  }
+  if (input.stopAtLimit !== undefined && typeof input.stopAtLimit !== "boolean") {
+    return { ok: false, error: "Say whether to stop at the budget." };
+  }
+  const stopAtLimit = monthlyUsd !== null && ((input.stopAtLimit as boolean | undefined) ?? current.stopAtLimit);
+  return { ok: true, value: { monthlyUsd, stopAtLimit } };
+}
+
 /** The share of the budget that shows a warning. */
 export const warnAt = 0.8;
 

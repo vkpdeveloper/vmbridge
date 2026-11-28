@@ -101,7 +101,7 @@ export function BudgetSection({ budget: live }: { budget: BudgetStatus }) {
           </label>
           <Switch
             id="budget-stop"
-            checked={budget.stopAtLimit}
+            checked={budget.stopAtLimit && budget.monthlyUsd !== null}
             disabled={action.busy || budget.monthlyUsd === null}
             onCheckedChange={(stopAtLimit) => void save({ stopAtLimit })}
           />
