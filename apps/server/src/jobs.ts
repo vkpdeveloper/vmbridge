@@ -16,7 +16,9 @@ export interface Job {
 /** VM Bridge's periodic work. Each run handles its own failures. */
 export function bridgeJobs(deps: { hub: Hub; fleet: Fleet; stats: Stats; usage: Usage; budget: Budget; traffic: Traffic; watch: Watch }): Job[] {
   const { hub, fleet, stats, usage, budget, traffic, watch } = deps;
-  let budgetLevel = budget.status().level;
+  const initial = budget.status();
+  let budgetLevel = initial.level;
+  let budgetMonth = initial.monthStart;
   return [
     {
       name: "idle sweep",
@@ -34,10 +36,11 @@ export function bridgeJobs(deps: { hub: Hub; fleet: Fleet; stats: Stats; usage: 
       everyMs: heartbeatMs,
       run: async () => {
         usage.sync(Date.now(), true);
-        // Spend grows while VMs are awake with nothing else changing, so the dashboard's budget banner needs a nudge.
-        const level = budget.status().level;
-        if (level === budgetLevel) return;
-        budgetLevel = level;
+        // Spend grows while VMs are awake, and month rollover shifts budget.monthStart even on a quiet fleet.
+        const current = budget.status();
+        if (current.level === budgetLevel && current.monthStart === budgetMonth) return;
+        budgetLevel = current.level;
+        budgetMonth = current.monthStart;
         fleet.emit("changed");
       },
     },

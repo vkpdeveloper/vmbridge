@@ -7,7 +7,8 @@ import { FieldError } from "@/components/ui/field";
 import { cn } from "@/lib/utils";
 import { api, useTick } from "./api.ts";
 import { AgentLogo, ProviderLogo } from "./brand.tsx";
-import { Bars, days, hours, money, rangeStart, Rows, Tile, type Range } from "./Costs.tsx";
+import { Bars, days, hours, money, Rows, Tile, type Range } from "./Costs.tsx";
+import { usageWindow } from "./lib/costs.ts";
 import { Section } from "./Page.tsx";
 
 /** One fixed color per provider, so a provider keeps its color in every chart and range. */
@@ -25,6 +26,12 @@ const providerColors: Record<ProviderId, string> = {
 const otherColor = "#5c5c5c";
 
 export function Analytics({ overview, range }: { overview: Overview; range: Range }) {
+  const { monthStart } = overview.budget;
+  const windowKey = range === "month" ? `${range}:${monthStart}` : range;
+  return <AnalyticsView key={windowKey} overview={overview} range={range} monthStart={monthStart} />;
+}
+
+function AnalyticsView({ overview, range, monthStart }: { overview: Overview; range: Range; monthStart: number }) {
   const [report, setReport] = useState<AnalyticsReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Awake time adds up while the page is open, and a VM waking or sleeping changes it.
@@ -33,22 +40,22 @@ export function Analytics({ overview, range }: { overview: Overview; range: Rang
 
   useEffect(() => {
     let cancelled = false;
-    const now = Date.now();
+    const { from, to } = usageWindow(range, Date.now(), monthStart);
     const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    api<AnalyticsReport>(`/analytics?from=${rangeStart(range, now)}&to=${now}&tz=${encodeURIComponent(timeZone)}`)
+    api<AnalyticsReport>(`/analytics?from=${from}&to=${to}&tz=${encodeURIComponent(timeZone)}`)
       .then((next) => !cancelled && (setReport(next), setError(null)))
       .catch((cause: Error) => !cancelled && setError(cause.message));
     return () => {
       cancelled = true;
     };
-  }, [range, tick, fleet]);
+  }, [range, tick, fleet, monthStart]);
 
   const label = (id: ProviderId) => overview.providers.find((provider) => provider.id === id)?.label ?? id[0]!.toUpperCase() + id.slice(1);
 
   return (
     <>
       {error && <FieldError>{error}</FieldError>}
-      {report && <Report report={report} label={label} />}
+      {report ? <Report report={report} label={label} /> : !error && <p role="status" className="text-sm text-muted-foreground">Loading…</p>}
     </>
   );
 }
