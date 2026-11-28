@@ -6,7 +6,8 @@ import { findWorktreeProgram, fixWorktreeLinks, listWorktreesProgram, removeWork
 import { quote } from "../src/vm/runtime.ts";
 import { openDatabase } from "../src/bun/sqlite.ts";
 import type { Hub } from "../src/gateway/hub.ts";
-import { syncWorktrees } from "../src/gateway/opencode-launch.ts";
+import { openCodeLauncher, syncWorktrees } from "../src/gateway/opencode-launch.ts";
+import { Traffic } from "../src/traffic.ts";
 import { Store } from "../src/store.ts";
 import { testEncryption } from "./key.ts";
 
@@ -127,5 +128,26 @@ describe("the resume list", () => {
       { name: "kept0001", vmId: "awake", branch: "fix/login", lastUsedAt: old },
       { name: "slept001", vmId: "asleep", branch: "opencode/slept001", lastUsedAt: old },
     ]);
+  });
+});
+
+describe("closing vmbridge opencode", () => {
+  test("answers before the VM removes the worktree, then forgets it once removed", async () => {
+    const db = openDatabase(":memory:");
+    const store = new Store(db, testEncryption);
+    store.insertProject({ id: "p1", url: "https://github.com/acme/app.git", branch: null, title: "app", createdAt: 0 });
+    store.insertVm({ id: "vm1", provider: "boat", name: "vm1", size: "small", state: "ready", createdAt: 0 });
+    store.addProjectVm("p1", "vm1");
+    store.addOpenCodeWorktree({ projectId: "p1", vmId: "vm1", name: "ab12cd34", branch: "opencode/ab12cd34", base: "main" });
+    const removal = Promise.withResolvers<{ removed: boolean }>();
+    const fleet = { removeWorktree: () => removal.promise } as unknown as Hub["fleet"];
+    const handle = openCodeLauncher({ store, hub: { fleet } as Hub, clones: {} as never, traffic: new Traffic(db), hasKey: () => true, githubToken: () => undefined });
+    const body = JSON.stringify({ projectId: "p1", vmId: "vm1", name: "ab12cd34" });
+    const response = await handle(new Request("http://bridge.test/api/vmbridge/opencode", { method: "DELETE", body }));
+    expect(response.status).toBe(202);
+    expect(store.openCodeWorktrees("p1")).toHaveLength(1);
+    removal.resolve({ removed: true });
+    await Bun.sleep(0);
+    expect(store.openCodeWorktrees("p1")).toEqual([]);
   });
 });

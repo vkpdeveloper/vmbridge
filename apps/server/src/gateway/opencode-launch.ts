@@ -133,8 +133,9 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
 }
 
 /**
- * Removes a worktree `launch` made. Answers `{ removed, branch }`: removed is false when it holds work, or an agent may be
- * using it, and branch is the one a kept worktree is on when its VM said.
+ * Removes a worktree `launch` made, once the terminal app closes, unless it holds work or an agent may be using it. It
+ * answers at once and removes in the background, so the terminal does not wait on the VM. On Cloudflare the Durable
+ * Object keeps running after it answers, as it does for VM Bridge's other background work.
  */
 async function finish({ store, hub, traffic }: Deps, request: Request) {
   const body = (await request.json().catch(() => null)) as { projectId?: unknown; vmId?: unknown; name?: unknown } | null;
@@ -142,19 +143,18 @@ async function finish({ store, hub, traffic }: Deps, request: Request) {
   if (typeof projectId !== "string" || typeof vmId !== "string" || typeof name !== "string" || !store.project(projectId)) {
     return Response.json({ error: "No such worktree." }, { status: 404 });
   }
-  try {
-    const { removed, branch } = await hub.fleet.removeWorktree(vmId, projectId, name);
-    if (removed) store.removeOpenCodeWorktree(projectId, name);
-    else {
-      store.touchOpenCodeWorktree(projectId, name);
-      if (branch) store.setOpenCodeWorktreeBranch(projectId, name, branch);
-    }
-    traffic.record({ kind: "system", operation: `OpenCode worktree ${name} ${removed ? "removed" : "kept"}`, vmId, status: "ok" });
-    return Response.json({ removed, branch: branch ?? null });
-  } catch (error) {
-    traffic.record({ kind: "system", operation: `Removing OpenCode worktree ${name}: ${message(error)}`, vmId, status: "error" });
-    return Response.json({ removed: false });
-  }
+  void hub.fleet.removeWorktree(vmId, projectId, name).then(
+    ({ removed, branch }) => {
+      if (removed) store.removeOpenCodeWorktree(projectId, name);
+      else {
+        store.touchOpenCodeWorktree(projectId, name);
+        if (branch) store.setOpenCodeWorktreeBranch(projectId, name, branch);
+      }
+      traffic.record({ kind: "system", operation: `OpenCode worktree ${name} ${removed ? "removed" : "kept"}`, vmId, status: "ok" });
+    },
+    (error: unknown) => traffic.record({ kind: "system", operation: `Removing OpenCode worktree ${name}: ${message(error)}`, vmId, status: "error" }),
+  );
+  return new Response(null, { status: 202 });
 }
 
 /**

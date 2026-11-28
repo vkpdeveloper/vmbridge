@@ -193,16 +193,12 @@ async function open(root: string, body: { remote: string; branch: string | null;
   process.exitCode = await child.exited;
   process.off("SIGINT", ignore);
 
-  const answer = await fetch(new URL("/api/vmbridge/opencode", session.url), {
+  // VM Bridge answers at once and removes the worktree in the background, unless it holds work.
+  await fetch(new URL("/api/vmbridge/opencode", session.url), {
     method: "DELETE",
     headers: { authorization: `Bearer ${session.token}`, "content-type": "application/json" },
     body: JSON.stringify({ projectId: ready.projectId, vmId: ready.vmId, name: ready.name }),
-  })
-    .then((response) => (response.ok ? (response.json() as Promise<{ removed: boolean; branch?: string | null }>) : null))
-    .catch(() => null);
-  if (answer?.removed) console.log(`Removed the worktree ${ready.branch}.`);
-  else {
-    console.log(`Kept the worktree ${answer?.branch ?? ready.branch} on ${ready.vm}: it has work that is not pushed, or an agent is still running.`);
-    console.log(`Open it again with: vb opencode resume ${ready.name}`);
-  }
+    signal: AbortSignal.timeout(5_000),
+  }).catch(() => {});
+  console.log(`Cleaning up ${ready.branch} in the background. If it has work, \`vb opencode resume ${ready.name}\` opens it again.`);
 }
