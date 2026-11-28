@@ -108,6 +108,9 @@ function same(a: string, b: string) {
 const base64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 const random = (size: number) => base64url(crypto.getRandomValues(new Uint8Array(size)));
 
+const unanswered = () =>
+  new SandboxError("Boat did not answer while refreshing VM Bridge's access. It is tried again on the next request.", { code: "unavailable", provider: "boat" });
+
 const lost = () =>
   new SandboxError("Boat ended VM Bridge's access. Connect Boat again in Accounts.", { code: "auth", provider: "boat" });
 
@@ -311,15 +314,12 @@ export class BoatSignIn implements SignIn {
         }
         throw new SandboxError(`Boat refused to refresh VM Bridge's access (HTTP ${response.status}).`, { code: "auth", provider: "boat" });
       }
-      // The next send must still reach Boat inside its minute, so a wait that would end past the window is not taken.
+      // Every resend must reach Boat inside its minute: a wait that would end past it is not taken, and a wait that
+      // ran late (a paused process, a slow timer) sends nothing.
       const wait = 1_000 * 2 ** attempt;
-      if (Date.now() + wait - started > resendWindowMs) {
-        throw new SandboxError("Boat did not answer while refreshing VM Bridge's access. It is tried again on the next request.", {
-          code: "unavailable",
-          provider: "boat",
-        });
-      }
+      if (Date.now() + wait - started > resendWindowMs) throw unanswered();
       await sleep(wait);
+      if (Date.now() - started > resendWindowMs) throw unanswered();
     }
   }
 

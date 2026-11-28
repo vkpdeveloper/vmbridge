@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import { boat, boatCredentials } from "../src/providers/boat.ts";
 import { BoatSignIn, boatClientId } from "../src/providers/boat-sign-in.ts";
 import type { Credentials } from "../src/providers/types.ts";
@@ -159,6 +159,26 @@ describe("Boat sign-in", () => {
     await signIn.finish(new URLSearchParams({ code: "code_2", state }));
     expect(revoked).toEqual(["boatrt_1"]);
     expect(await signIn.token()).toBe("boat_access_2");
+  });
+
+  test("a resend whose wait ran past Boat's minute is not sent", async () => {
+    let refreshes = 0;
+    const { secrets, signIn } = await connected(async (url, init) => {
+      if (!url.endsWith("/oauth2/token")) return json({ user: { login: "a" } });
+      if (form(init).get("grant_type") === "authorization_code") return json(tokens(1));
+      refreshes++;
+      // The process stalls while it waits to resend: the clock jumps past Boat's minute during the wait.
+      setTimeout(() => setSystemTime(new Date(Date.now() + 70_000)), 300);
+      throw new TypeError("fetch failed");
+    });
+    expireSoon(secrets);
+    try {
+      await expect(signIn.token()).rejects.toThrow("did not answer");
+    } finally {
+      setSystemTime();
+    }
+    expect(refreshes).toBe(1);
+    expect(signIn.status().connected).toBe(true);
   });
 
   test("a refresh token Boat refuses ends the connection", async () => {
