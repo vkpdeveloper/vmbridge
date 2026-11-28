@@ -185,8 +185,17 @@ const tools = [
     description: "Presses the left button at x, y, moves to to_x, to_y and releases it there.",
     inputSchema: { type: "object", properties: { ...point, to_x: whole, to_y: whole }, required: ["x", "y", "to_x", "to_y"] },
     async run({ x, y, to_x, to_y }) {
-      await xdotool("mousemove", "--sync", pixel(x, "x"), pixel(y, "y"), "mousedown", 1);
-      await xdotool("mousemove", "--sync", pixel(to_x, "to_x"), pixel(to_y, "to_y"), "mouseup", 1);
+      const fromX = pixel(x, "x");
+      const fromY = pixel(y, "y");
+      const toX = pixel(to_x, "to_x");
+      const toY = pixel(to_y, "to_y");
+      try {
+        await xdotool("mousemove", "--sync", fromX, fromY, "mousedown", 1);
+        await xdotool("mousemove", "--sync", toX, toY, "mouseup", 1);
+      } catch (error) {
+        await xdotool("mouseup", 1).catch(() => {});
+        throw error;
+      }
     },
   },
   {
@@ -232,7 +241,7 @@ async function act(tool, args) {
     if (!content) await settle();
     return { content: content || done };
   } catch (error) {
-    return { content: [{ type: "text", text: error.message }], isError: true };
+    return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
   }
 }
 
@@ -247,32 +256,36 @@ async function handle(line) {
   } catch {
     return send({ id: null, error: { code: -32700, message: "Parse error" } });
   }
-  // Notifications need no answer.
-  if (message.id === undefined || message.id === null) return;
+  // Notifications and non-object JSON values need no answer.
+  if (!message || typeof message !== "object" || Array.isArray(message) || message.id === undefined || message.id === null) return;
   const { id, method, params } = message;
-  if (method === "initialize") {
-    return send({
-      id,
-      result: {
-        protocolVersion: (params && params.protocolVersion) || "2025-06-18",
-        capabilities: { tools: {} },
-        serverInfo: { name: "desktop", version: "1.0.0" },
-        instructions:
-          "The VM's own desktop, the one a person watching the screen sees. Take a screenshot, act on its pixels, then take another." +
-          (screen ? " This desktop is Kubi screen " + screen + ": pass screen \\"" + screen + "\\" to Kubi's tools." : ""),
-      },
-    });
+  try {
+    if (method === "initialize") {
+      return send({
+        id,
+        result: {
+          protocolVersion: (params && params.protocolVersion) || "2025-06-18",
+          capabilities: { tools: {} },
+          serverInfo: { name: "desktop", version: "1.0.0" },
+          instructions:
+            "The VM's own desktop, the one a person watching the screen sees. Take a screenshot, act on its pixels, then take another." +
+            (screen ? " This desktop is Kubi screen " + screen + ": pass screen \\"" + screen + "\\" to Kubi's tools." : ""),
+        },
+      });
+    }
+    if (method === "ping") return send({ id, result: {} });
+    if (method === "tools/list") return send({ id, result: { tools: tools.map(({ run, ...tool }) => tool) } });
+    if (method === "tools/call") {
+      const tool = tools.find((entry) => entry.name === (params && params.name));
+      if (!tool) return send({ id, error: { code: -32602, message: "Unknown tool" } });
+      const call = turn.then(() => act(tool, (params && params.arguments) || {}));
+      turn = call;
+      return send({ id, result: await call });
+    }
+    send({ id, error: { code: -32601, message: "Method not found" } });
+  } catch (error) {
+    send({ id, error: { code: -32603, message: error instanceof Error ? error.message : String(error) } });
   }
-  if (method === "ping") return send({ id, result: {} });
-  if (method === "tools/list") return send({ id, result: { tools: tools.map(({ run, ...tool }) => tool) } });
-  if (method === "tools/call") {
-    const tool = tools.find((entry) => entry.name === (params && params.name));
-    if (!tool) return send({ id, error: { code: -32602, message: "Unknown tool" } });
-    const call = turn.then(() => act(tool, (params && params.arguments) || {}));
-    turn = call;
-    return send({ id, result: await call });
-  }
-  send({ id, error: { code: -32601, message: "Method not found" } });
 }
 
 let buffer = "";
@@ -283,7 +296,7 @@ process.stdin.on("data", (chunk) => {
   while ((end = buffer.indexOf("\\n")) >= 0) {
     const line = buffer.slice(0, end).trim();
     buffer = buffer.slice(end + 1);
-    if (line) void handle(line);
+    if (line) void handle(line).catch(() => {});
   }
 });
 `;

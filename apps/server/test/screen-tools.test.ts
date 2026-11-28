@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codexConfig, opencodeConfig, screenToolsFiles } from "../src/vm/screen-tools.ts";
@@ -36,20 +36,29 @@ describe("the desktop server", () => {
   });
 
   /** Runs the server with an xdotool that logs its arguments, sends `requests`, and returns the answers by id. */
-  async function talk(requests: object[]) {
+  async function talk(
+    requests: object[],
+    options: { rawPrefix?: string; xdotool?: (dir: string) => string; awaitExit?: boolean } = {},
+  ) {
     const dir = mkdtempSync(join(tmpdir(), "vmbridge-desktop-"));
     dirs.push(dir);
     writeFileSync(join(dir, "server.cjs"), screenToolsFiles(withKey)["/workspace/.vmbridge/desktop-mcp.cjs"]!);
-    writeFileSync(join(dir, "xdotool"), `#!/bin/sh\necho "$DISPLAY $*" >> "${dir}/xdotool.log"\n`);
+    writeFileSync(
+      join(dir, "xdotool"),
+      options.xdotool?.(dir) ?? `#!/bin/sh\necho "$DISPLAY $*" >> "${dir}/xdotool.log"\n`,
+    );
     chmodSync(join(dir, "xdotool"), 0o755);
-    const input = requests.map((request) => `${JSON.stringify({ jsonrpc: "2.0", ...request })}\n`).join("");
+    const input =
+      (options.rawPrefix ?? "") +
+      requests.map((request) => `${JSON.stringify({ jsonrpc: "2.0", ...request })}\n`).join("");
     const server = Bun.spawn(["node", join(dir, "server.cjs"), "scr_1"], {
       stdin: "pipe",
       stdout: "pipe",
       env: { PATH: `${dir}:${process.env.PATH}` },
     });
     server.stdin.write(input);
-    type Answer = { id: number; result?: Record<string, unknown>; error?: { code: number } };
+    if (options.awaitExit) server.stdin.end();
+    type Answer = { jsonrpc?: string; id: number; result?: Record<string, unknown>; error?: { code: number } };
     const answers = new Map<number, Answer>();
     const reader = server.stdout.getReader();
     let text = "";
@@ -57,14 +66,20 @@ describe("the desktop server", () => {
       const { value, done } = await reader.read();
       if (done) break;
       text += new TextDecoder().decode(value);
-      for (const line of text.split("\n").slice(0, -1)) {
+      const lines = text.split("\n");
+      text = lines.pop()!;
+      for (const line of lines) {
+        if (!line) continue;
         const answer = JSON.parse(line) as Answer;
         answers.set(answer.id, answer);
       }
     }
-    server.kill();
-    const log = () => readFileSync(join(dir, "xdotool.log"), "utf8").trim().split("\n");
-    return { answers, log };
+    const exitCode = options.awaitExit ? await server.exited : (server.kill(), null);
+    const log = () => {
+      const logPath = join(dir, "xdotool.log");
+      return existsSync(logPath) ? readFileSync(logPath, "utf8").trim().split("\n") : [];
+    };
+    return { answers, log, exitCode };
   }
 
   test("speaks MCP, names its screen for Kubi's tools, and drives xdotool on display :0, one call at a time", async () => {
@@ -101,5 +116,62 @@ describe("the desktop server", () => {
     ]);
     expect(answers.get(1)!.result).toEqual({ content: [{ type: "text", text: "x must be a whole number of pixels, 0 or more." }], isError: true });
     expect(answers.get(2)!.error!.code).toBe(-32601);
+  });
+
+  test("drag validates destination coordinates before pressing the mouse button", async () => {
+    const { answers, log } = await talk([
+      { id: 1, method: "tools/call", params: { name: "drag", arguments: { x: 1, y: 2, to_x: -5, to_y: 4 } } },
+    ]);
+    expect(answers.get(1)!.result).toEqual({
+      content: [{ type: "text", text: "to_x must be a whole number of pixels, 0 or more." }],
+      isError: true,
+    });
+    expect(log()).toEqual([]);
+  });
+
+  test("drag releases the mouse button when the mousedown step fails and preserves its error", async () => {
+    const { answers, log } = await talk(
+      [{ id: 1, method: "tools/call", params: { name: "drag", arguments: { x: 1, y: 2, to_x: 3, to_y: 4 } } }],
+      {
+        xdotool: (dir) =>
+          `#!/bin/sh\necho "$DISPLAY $*" >> "${dir}/xdotool.log"\nif [ "$1" = "mousemove" ] && [ "$3" = "1" ]; then echo "mousedown failed" >&2; exit 1; fi\nif [ "$1" = "mouseup" ]; then echo "mouseup failed" >&2; exit 1; fi\n`,
+      },
+    );
+    expect(answers.get(1)!.result).toEqual({
+      content: [{ type: "text", text: "mousedown failed" }],
+      isError: true,
+    });
+    expect(log()).toEqual([
+      ":0 mousemove --sync 1 2 mousedown 1",
+      ":0 mouseup 1",
+    ]);
+  });
+
+  test("drag releases the mouse button when the move-and-release step fails", async () => {
+    const { answers, log } = await talk(
+      [{ id: 1, method: "tools/call", params: { name: "drag", arguments: { x: 1, y: 2, to_x: 3, to_y: 4 } } }],
+      {
+        xdotool: (dir) =>
+          `#!/bin/sh\necho "$DISPLAY $*" >> "${dir}/xdotool.log"\nif [ "$1" = "mousemove" ] && [ "$3" = "3" ]; then echo "move failed" >&2; exit 1; fi\n`,
+      },
+    );
+    expect(answers.get(1)!.result).toEqual({
+      content: [{ type: "text", text: "move failed" }],
+      isError: true,
+    });
+    expect(log()).toEqual([
+      ":0 mousemove --sync 1 2 mousedown 1",
+      ":0 mousemove --sync 3 4 mouseup 1",
+      ":0 mouseup 1",
+    ]);
+  });
+
+  test("ignores non-object JSON lines on stdin and keeps answering requests", async () => {
+    const { answers, exitCode } = await talk([{ id: 1, method: "ping" }], {
+      rawPrefix: 'null\n123\n"hi"\n[]\n',
+      awaitExit: true,
+    });
+    expect(answers.get(1)).toEqual({ jsonrpc: "2.0", id: 1, result: {} });
+    expect(exitCode).toBe(0);
   });
 });
