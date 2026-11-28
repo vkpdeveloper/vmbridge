@@ -4,7 +4,7 @@ import { createHttpClient, type ExecInput, type ExecResult, type Fetch, type Fil
 import type { SelectOption } from "@vmbridge/contracts";
 import { sleep } from "../runtime.ts";
 import { notFound, sdkDriver } from "./sdk.ts";
-import { required, type Box, type Credentials, type ProviderDefinition, type ProviderState } from "./types.ts";
+import { required, type Box, type Credentials, type ProviderConfig, type ProviderDefinition, type ProviderState } from "./types.ts";
 
 /**
  * Boat (boat.dev) over its HTTP API (https://boat.dev/api/v1), as a sandbox-sdk provider, so the SDK builds the same
@@ -565,12 +565,29 @@ export function boat(options: BoatOptions): BoatProvider {
   };
 }
 
-const apiKeyCredentials = (apiKey: string): Credentials => ({
-  token: async () => apiKey,
-  // A key cannot be refreshed: a refused one stays refused.
-  refresh: async () => {},
-  secretValues: () => [apiKey],
-});
+/**
+ * What each request authenticates with: the sign-in while it is connected, otherwise the saved API key. Read for every
+ * request, because VMs already open keep the provider they were opened with: after a disconnect, or a key saved or
+ * replaced later, they use what is saved now instead of failing until they reconnect.
+ */
+export function boatCredentials(config: ProviderConfig): Credentials {
+  const { signIn } = config;
+  const key = () => (config.latest?.() ?? config.values).apiKey || null;
+  const keyToken = () => {
+    const value = key();
+    if (value) return value;
+    // Disconnected with no key saved: the sign-in says to connect again.
+    if (signIn) return signIn.token();
+    throw new SandboxError("Add a Boat API key or connect Boat in Accounts.", { code: "auth", provider: "boat" });
+  };
+  return {
+    token: async () => (signIn?.connected() ? signIn.token() : keyToken()),
+    // A key cannot be refreshed: a refused one stays refused.
+    refresh: async () => (signIn?.connected() ? signIn.refresh() : undefined),
+    // The key the driver opened with too, in case an error still carries it.
+    secretValues: () => [...(signIn?.secretValues() ?? []), config.values.apiKey, key()].filter((value): value is string => Boolean(value)),
+  };
+}
 
 export const boatProvider: ProviderDefinition = {
   id: "boat",
@@ -598,18 +615,9 @@ export const boatProvider: ProviderDefinition = {
   defaultSize: "small",
 
   open(config) {
-    const signIn = config.signIn;
-    const signedIn = () => signIn?.connected() === true;
-    const key = signedIn() ? (config.values.apiKey ? apiKeyCredentials(config.values.apiKey) : null) : apiKeyCredentials(required(config, "apiKey", "Boat API key"));
-    // VMs already open keep this driver's provider, so every request picks what is in use then: after a disconnect,
-    // the saved key, instead of failing until the VM reconnects.
-    const current = () => (signedIn() || !key ? signIn! : key);
-    const credentials: Credentials = {
-      token: () => current().token(),
-      refresh: () => current().refresh(),
-      secretValues: () => [...(signIn?.secretValues() ?? []), ...(key?.secretValues() ?? [])],
-    };
-    const provider = boat({ credentials });
+    const signedIn = () => config.signIn?.connected() === true;
+    if (!signedIn()) required(config, "apiKey", "Boat API key");
+    const provider = boat({ credentials: boatCredentials(config) });
     const { client } = provider;
     const base = sdkDriver({ id: "boat", provider, sleep: "pause" });
 

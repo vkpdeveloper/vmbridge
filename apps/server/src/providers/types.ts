@@ -91,6 +91,8 @@ export interface ProviderConfig {
   values: Record<string, string>;
   /** The provider's sign-in, connected or not. While connected, the provider uses it instead of its key field. */
   signIn?: SignIn;
+  /** The saved values now, for VMs still open on this driver after they changed (Boat reads its key per request). */
+  latest?: () => Record<string, string>;
 }
 
 /** A sign-in that can be connected and disconnected while drivers and their VMs stay open. */

@@ -177,7 +177,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
     const signature = JSON.stringify([values, connection]);
     const cached = this.drivers.get(provider);
     if (cached?.signature === signature) return cached.driver;
-    const driver = providers[provider].open({ values, signIn });
+    const driver = providers[provider].open({ values, signIn, latest: () => providerValues(this.settings, this.secrets, provider) });
     this.drivers.set(provider, { signature, driver });
     return driver;
   }

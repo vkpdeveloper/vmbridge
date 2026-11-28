@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { boat } from "../src/providers/boat.ts";
+import { boat, boatCredentials } from "../src/providers/boat.ts";
 import { BoatSignIn, boatClientId } from "../src/providers/boat-sign-in.ts";
 import type { Credentials } from "../src/providers/types.ts";
 import { GET as relay } from "../../landing/app/boat/callback/route.ts";
@@ -248,6 +248,23 @@ describe("Boat API", () => {
     const { calls, provider } = fakeBoat();
     await provider.files.mkdir("sb_1", "/tmp/x");
     expect(calls.map((call) => call.authorization)).toEqual(["Bearer boat_access_1", "Bearer boat_access_2"]);
+  });
+});
+
+describe("Boat credentials", () => {
+  test("a VM opened while connected uses a key saved after a disconnect, and a replaced key, without reopening", async () => {
+    let connected = true;
+    const saved: Record<string, string> = {};
+    const signIn = { connected: () => connected, token: async () => "boat_access_1", refresh: async () => {}, secretValues: () => ["boat_access_1"] };
+    const credentials = boatCredentials({ values: {}, signIn, latest: () => saved });
+    expect(await credentials.token()).toBe("boat_access_1");
+
+    connected = false;
+    saved.apiKey = "boat_key_1";
+    expect(await credentials.token()).toBe("boat_key_1");
+    saved.apiKey = "boat_key_2";
+    expect(await credentials.token()).toBe("boat_key_2");
+    expect(credentials.secretValues()).toContain("boat_key_2");
   });
 });
 
