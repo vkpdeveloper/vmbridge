@@ -19,6 +19,39 @@ export const worktreePath = (checkout: string, name: string) => {
 export const worktreeName = /^[a-z0-9]{4,32}$/;
 
 /**
+ * Mends the links between the checkout and a worktree (both shell words, quoted), then points the worktree's `.git`
+ * file at the checkout by the checkout's own path. Git writes the path it resolved instead, and right after a Boat VM
+ * resumes that is a folder its lazily restored disk is served from for a while (/var/lib/ascii-lazy/retired/...),
+ * which stops holding the repository later, leaving git unable to open the worktree.
+ */
+export const fixWorktreeLinks = (checkout: string, path: string) =>
+  `git -C ${checkout} worktree repair ${path} >/dev/null 2>&1 || true
+id="$(sed -n 's|^gitdir: .*/worktrees/||p' ${path}/.git 2>/dev/null || true)"
+if [ -n "$id" ] && [ -d ${checkout}/.git/worktrees/"$id" ]; then printf 'gitdir: %s/.git/worktrees/%s\\n' ${checkout} "$id" > ${path}/.git; fi`;
+
+/** Prints the branch a worktree is on, or nothing when its folder is gone. */
+export function findWorktreeProgram(checkout: string, name: string) {
+  const path = quote(worktreePath(checkout, name));
+  return `[ -d ${path} ] || exit 0
+${fixWorktreeLinks(quote(checkout), path)}
+git -C ${path} rev-parse --abbrev-ref HEAD`;
+}
+
+/**
+ * Prints each worktree in the checkout's worktree folder that git can open, as its name, branch and the Unix time its
+ * folder last changed, tab-separated, one per line.
+ */
+export function listWorktreesProgram(checkout: string) {
+  return `for path in ${quote(worktreePath(checkout, ""))}*/; do
+  [ -d "$path" ] || continue
+  path="\${path%/}"
+  ${fixWorktreeLinks(quote(checkout), '"$path"')}
+  branch="$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null)" || continue
+  printf '%s\\t%s\\t%s\\n' "\${path##*/}" "$branch" "$(date -r "$path" +%s)"
+done`;
+}
+
+/**
  * Removes a worktree and its `opencode/<name>` branch once nothing would be lost: no uncommitted or untracked files,
  * and no commit that is not on the remote. Prints `removed`, or `kept` and the branch it is on, which an agent may have
  * changed.
@@ -28,6 +61,7 @@ export function removeWorktreeProgram(checkout: string, name: string) {
   const keep = `{ printf 'kept %s' "$(git -C ${path} branch --show-current)"; exit 0; }`;
   return `cd ${quote(checkout)}
 if [ -d ${path} ]; then
+  ${fixWorktreeLinks(quote(checkout), path)}
   [ -z "$(git -C ${path} status --porcelain)" ] || ${keep}
   [ -z "$(git -C ${path} rev-list -1 HEAD --not --remotes)" ] || ${keep}
   git worktree remove --force ${path}

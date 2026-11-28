@@ -17,7 +17,7 @@ import { hasLiveWork, type Shell } from "./gateway/types.ts";
 import type { Skills } from "./skills.ts";
 import { Bases } from "./vm/bases.ts";
 import { newToken } from "./auth/tokens.ts";
-import { NoOpenCodeKey, openCodeBusy, OpenCodeServer, opencodePort, removeWorktreeProgram, startOpenCode, stopOpenCode, worktreeName, worktreePath } from "./vm/opencode.ts";
+import { findWorktreeProgram, fixWorktreeLinks, listWorktreesProgram, NoOpenCodeKey, openCodeBusy, OpenCodeServer, opencodePort, removeWorktreeProgram, startOpenCode, stopOpenCode, worktreeName, worktreePath } from "./vm/opencode.ts";
 import { syncSkills } from "./vm/skills.ts";
 import { checkoutRoot, credentialsFingerprint, prepareVm, quote, readCodexAuth, runProgram, resolveT3Version, startT3, t3Port, writeCodexAuth, writeCredentials, type VmCredentials } from "./vm/runtime.ts";
 
@@ -41,6 +41,9 @@ export class NoProvider extends Error {
     super("Choose a VM provider in the VM Bridge dashboard first.");
   }
 }
+
+/** A worktree `findWorktree` looked for is on none of the project's VMs, as opposed to one it could not open. */
+export class WorktreeGone extends Error {}
 
 export class SettingUp extends Error {
   constructor(provider: ProviderId) {
@@ -1110,6 +1113,7 @@ ${named}
 [ -n "$base" ] || base="$(git rev-parse --abbrev-ref HEAD)"
 mkdir -p ${quote(path.slice(0, path.lastIndexOf("/")))}
 git worktree add --quiet -b ${quote(branch)} ${quote(path)} "origin/$base" >&2
+${fixWorktreeLinks(quote(checkout), quote(path))}
 printf '%s' "$base"`,
         "Making a worktree",
       );
@@ -1149,13 +1153,33 @@ printf '%s' "$base"`,
       const path = worktreePath(entry.checkoutPath!, name);
       const release = this.lease(entry.vmId);
       try {
-        const branch = await runProgram(box, `[ -d ${quote(path)} ] || exit 0\ngit -C ${quote(path)} rev-parse --abbrev-ref HEAD`, "Looking for a worktree");
+        const branch = await runProgram(box, findWorktreeProgram(entry.checkoutPath!, name), "Opening the worktree");
         if (branch.trim()) return { vmId: entry.vmId, path, branch: branch.trim() };
       } finally {
         release();
       }
     }
-    throw new Error(`No worktree ${name} on ${project.title}'s VMs. It may have been removed.`);
+    throw new WorktreeGone(`No worktree ${name} on ${project.title}'s VMs. It may have been removed.`);
+  }
+
+  /**
+   * The worktrees `worktree` made that are on this VM, read from the VM itself, or null when it is not awake. Links git
+   * cannot follow are mended on the way (see `fixWorktreeLinks`).
+   */
+  async worktreesOn(vmId: string, projectId: string): Promise<{ name: string; branch: string; changedAt: number }[] | null> {
+    const box = this.machineReady(vmId) ? this.boxes.get(vmId) : undefined;
+    const checkout = this.project(projectId).vms.find((entry) => entry.vmId === vmId)?.checkoutPath;
+    if (!box || !checkout) return null;
+    const release = this.lease(vmId);
+    try {
+      const lines = (await runProgram(box, listWorktreesProgram(checkout), "Listing worktrees", 30_000)).split("\n");
+      return lines.flatMap((line) => {
+        const [name = "", branch = "", changed = ""] = line.split("\t");
+        return worktreeName.test(name) && branch ? [{ name, branch, changedAt: Number(changed) * 1000 || Date.now() }] : [];
+      });
+    } finally {
+      release();
+    }
   }
 
   /**

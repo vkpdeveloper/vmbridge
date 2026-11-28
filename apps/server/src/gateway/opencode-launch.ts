@@ -1,7 +1,7 @@
 // `vmbridge opencode`: from a local repository to OpenCode running in a fresh worktree on one of its project's VMs.
 import type { OpenCodeLaunchEvent, OpenCodeWorktrees } from "@vmbridge/contracts";
 import { newToken } from "../auth/tokens.ts";
-import { message } from "../fleet.ts";
+import { message, WorktreeGone } from "../fleet.ts";
 import { fetchPullRequest } from "../github.ts";
 import type { Store } from "../store.ts";
 import type { Traffic } from "../traffic.ts";
@@ -80,7 +80,8 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
           const noted = store.openCodeWorktrees(project.id).find((row) => row.name === resume);
           step(`Opening ${noted?.branch ?? resume}`);
           const found = await hub.fleet.findWorktree(project.id, resume, step, detail, noted?.vmId).catch((error: unknown) => {
-            if (noted) store.removeOpenCodeWorktree(project.id, resume);
+            // Only when it is gone: one git could not open is still there, with its work.
+            if (noted && error instanceof WorktreeGone) store.removeOpenCodeWorktree(project.id, resume);
             throw error;
           });
           vmId = found.vmId;
@@ -157,10 +158,36 @@ async function finish({ store, hub, traffic }: Deps, request: Request) {
 }
 
 /**
- * The worktrees of the repository at `?remote=` that are still on its VMs, from what VM Bridge noted, waking none. Each
- * comes with its branch's pull request when the repository is on GitHub.
+ * Brings what VM Bridge noted of a project's worktrees in line with its awake VMs: every worktree on one is listed, even
+ * one VM Bridge never noted or forgot, and one whose folder is gone is not. Sleeping VMs are not woken for it.
  */
-async function list({ store, clones, githubToken }: Deps, request: Request) {
+export async function syncWorktrees(store: Store, hub: Pick<Hub, "fleet">, projectId: string) {
+  const started = Date.now();
+  const project = store.project(projectId);
+  if (!project) return;
+  await Promise.all(
+    project.vms.map(async ({ vmId }) => {
+      const found = await hub.fleet.worktreesOn(vmId, projectId).catch(() => null);
+      if (!found) return;
+      const noted = store.openCodeWorktrees(projectId);
+      for (const worktree of found) {
+        const row = noted.find((entry) => entry.name === worktree.name);
+        if (!row) store.addOpenCodeWorktree({ projectId, vmId, name: worktree.name, branch: worktree.branch, base: null }, worktree.changedAt);
+        else if (row.vmId === vmId && row.branch !== worktree.branch) store.setOpenCodeWorktreeBranch(projectId, worktree.name, worktree.branch);
+      }
+      // Not one made while this looked: it was not there to be found yet.
+      for (const row of noted) {
+        if (row.vmId === vmId && row.createdAt < started && !found.some((worktree) => worktree.name === row.name)) store.removeOpenCodeWorktree(projectId, row.name);
+      }
+    }),
+  );
+}
+
+/**
+ * The worktrees of the repository at `?remote=` that are on its VMs: from what VM Bridge noted, checked against the VMs
+ * that are awake, waking none. Each comes with its branch's pull request when the repository is on GitHub.
+ */
+async function list({ store, hub, clones, githubToken }: Deps, request: Request) {
   const remote = new URL(request.url).searchParams.get("remote") ?? "";
   let project: ReturnType<Clones["find"]> = null;
   try {
@@ -168,6 +195,7 @@ async function list({ store, clones, githubToken }: Deps, request: Request) {
   } catch {
     // Not a remote VM Bridge can clone, so it has no project.
   }
+  if (project) await syncWorktrees(store, hub, project.id);
   const github = project ? githubName(project.url) : undefined;
   const token = githubToken();
   const answer: OpenCodeWorktrees = {

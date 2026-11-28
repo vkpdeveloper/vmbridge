@@ -328,11 +328,11 @@ export class Store {
     this.projectCache = null;
   }
 
-  addOpenCodeWorktree(row: Pick<OpenCodeWorktreeRow, "projectId" | "vmId" | "name" | "branch" | "base">) {
-    const now = Date.now();
+  /** Notes a worktree, unless it is noted already. `at` is when it was made and last used, now unless given. */
+  addOpenCodeWorktree(row: Pick<OpenCodeWorktreeRow, "projectId" | "vmId" | "name" | "branch" | "base">, at = Date.now()) {
     this.db.run(
-      "INSERT INTO opencode_worktrees (project_id, vm_id, name, branch, base, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      row.projectId, row.vmId, row.name, row.branch, row.base, now, now,
+      "INSERT OR IGNORE INTO opencode_worktrees (project_id, vm_id, name, branch, base, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      row.projectId, row.vmId, row.name, row.branch, row.base, at, at,
     );
   }
 
