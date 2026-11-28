@@ -6,7 +6,7 @@ import { fetchPullRequest } from "../github.ts";
 import { providers } from "../providers/index.ts";
 import type { Store } from "../store.ts";
 import type { Traffic } from "../traffic.ts";
-import { NoOpenCodeKey } from "../vm/opencode.ts";
+import { NoOpenCodeKey, type OpenCodeServer } from "../vm/opencode.ts";
 import type { Clones } from "./clones.ts";
 import type { Hub } from "./hub.ts";
 import { githubName } from "./repos.ts";
@@ -66,7 +66,7 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
         let worktree: { name: string; path: string; branch: string; base: string | null };
         let sessionId: string | null = null;
         // OpenCode starts beside the worktree being made. What it does shows once its step does, not under the worktree's.
-        let opening: Promise<unknown> | undefined;
+        let opening: Promise<OpenCodeServer> | undefined;
         let openingDetail: string | null = null;
         let showOpening = false;
         const startOpenCode = (vmId: string) => {
@@ -75,23 +75,28 @@ async function launch({ store, hub, clones, traffic, hasKey }: Deps, request: Re
             if (showOpening) detail(text);
           });
           opening.catch(() => {});
+          return opening;
         };
         if (resume) {
           // Where VM Bridge noted it, so only that VM wakes. Worktrees from before it noted them are looked for.
           const noted = store.openCodeWorktrees(project.id).find((row) => row.name === resume);
           step(`Opening ${noted?.branch ?? resume}`);
-          const found = await hub.fleet.findWorktree(project.id, resume, step, detail, noted?.vmId).catch((error: unknown) => {
+          // Where it was noted, OpenCode starts as soon as the VM is ready, and answers whether the worktree is there.
+          const openCode = noted ? (id: string) => opening ?? startOpenCode(id) : undefined;
+          const found = await hub.fleet.findWorktree(project.id, resume, step, detail, noted?.vmId, openCode).catch((error: unknown) => {
             // Only when it is gone: one git could not open is still there, with its work.
             if (noted && error instanceof WorktreeGone) store.removeOpenCodeWorktree(project.id, resume);
             throw error;
           });
           vmId = found.vmId;
-          worktree = { ...found, name: resume, base: noted?.base ?? null };
+          // OpenCode's answer has no branch, so it is the one noted until git's comes in.
+          const foundBranch = found.branch ?? noted?.branch ?? "HEAD";
+          worktree = { ...found, name: resume, branch: foundBranch, base: noted?.base ?? null };
           sessionId = noted?.sessionId ?? null;
           if (noted) {
             store.touchOpenCodeWorktree(project.id, resume);
-            store.setOpenCodeWorktreeBranch(project.id, resume, found.branch);
-          } else store.addOpenCodeWorktree({ projectId: project.id, vmId, name: resume, branch: found.branch, base: null });
+            if (found.branch) store.setOpenCodeWorktreeBranch(project.id, resume, found.branch);
+          } else store.addOpenCodeWorktree({ projectId: project.id, vmId, name: resume, branch: foundBranch, base: null });
         } else {
           step(`Finding a VM for ${project.title}`);
           const placement = await hub.placeOpenCode(project.id, step, detail);

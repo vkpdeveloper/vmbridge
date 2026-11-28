@@ -207,8 +207,7 @@ if pushed . ${branch}; then git branch -D ${quote(`opencode/${name}`)} >/dev/nul
 printf removed`;
 }
 const startPath = `${dir}/start.sh`;
-const processName = "opencode";
-
+const pidPath = `${dir}/server.pid`;
 /**
  * OpenCode's clients speak its 2.x API, which npm ships as @opencode/cli. npm's opencode-ai is the 1.x line, which
  * T3's own OpenCode agent keeps using, so this one gets its own folder.
@@ -251,12 +250,25 @@ return active?(Object.keys(active.data??{}).length?"busy":"idle"):"unknown";
 })().then((s)=>process.stdout.write(s))`;
 const probe = `node -e ${quote(probeScript)} ${passwordPath}`;
 
-const waitScript = `for _ in $(seq 120); do
+// Five times a second for two minutes: a probe is one short request to the VM itself.
+const waitScript = `for _ in $(seq 600); do
   state="$(${probe})"
   case "$state" in idle|busy) exit 0 ;; refused) echo "OpenCode refused VM Bridge's password." >&2; exit 1 ;; esac
-  sleep 1
+  sleep 0.2
 done
 echo "OpenCode did not answer within 2 minutes." >&2
+exit 1`;
+
+/**
+ * Ends the server VM Bridge started, its whole process group from the pid file, and any other `serve` on its port, as
+ * one an older VM Bridge started, then waits until nothing listens there. It fails while something still does.
+ */
+const stopScript = `if [ -f ${pidPath} ]; then kill -TERM -- -"$(cat ${pidPath})" 2>/dev/null || true; rm -f ${pidPath}; fi
+pkill -TERM -f -- "serve --hostname 0.0.0.0 --port ${opencodePort}" 2>/dev/null || true
+for _ in $(seq 50); do [ "$(${probe})" = down ] && exit 0; sleep 0.2; done
+pkill -KILL -f -- "serve --hostname 0.0.0.0 --port ${opencodePort}" 2>/dev/null || true
+for _ in $(seq 10); do [ "$(${probe})" = down ] && exit 0; sleep 0.2; done
+echo "VM Bridge could not stop OpenCode on the VM." >&2
 exit 1`;
 
 export class NoOpenCodeKey extends Error {
@@ -265,9 +277,14 @@ export class NoOpenCodeKey extends Error {
   }
 }
 
-/** Starts OpenCode in `cwd` unless it answers already, installing it first if the VM lacks it. */
+/**
+ * Starts OpenCode in `cwd` unless it answers already, installing it first if the VM lacks it, in one program: on a
+ * provider such as Boat each program is several requests. A server that answers with another password, is OpenCode 1,
+ * or does not answer properly is replaced. It runs in its own session, so it outlives the program, and its group is
+ * what `stopOpenCode` ends.
+ */
 export async function startOpenCode(box: Box, password: string, cwd: string, detail: (text: string) => void = () => {}) {
-  detail("Checking OpenCode on the VM");
+  detail("Starting OpenCode on the VM");
   const state = (
     await runProgram(
       box,
@@ -279,28 +296,16 @@ export async function startOpenCode(box: Box, password: string, cwd: string, det
         `. ${root}/env`,
         `[ -n "\${OPENCODE_API_KEY:-}" ] || { echo nokey; exit 0; }`,
         installCli,
-        probe,
+        // In a subshell, as it exits once nothing listens.
+        `case "$(${probe})" in idle|busy) echo up; exit 0 ;; down) ;; *) (\n${stopScript}\n) ;; esac`,
+        `setsid nohup bash -c 'echo $$ > ${pidPath}; exec bash ${startPath} "$1"' _ ${quote(cwd)} > ${dir}/server.log 2>&1 < /dev/null &`,
+        waitScript.replace(/exit 0 ;;/, "echo up; exit 0 ;;"),
       ].join("\n"),
       "Starting OpenCode",
       10 * 60_000,
     )
   ).trim();
   if (state === "nokey") throw new NoOpenCodeKey();
-  if (state === "idle" || state === "busy") return;
-  detail("Starting the OpenCode server");
-  // A server from before is running with another password, or is OpenCode 1. Restarted, it runs this start script.
-  if (state === "refused" || state === "old") await box.process(processName).restart();
-  else {
-    try {
-      await box.start(`bash ${startPath} ${quote(cwd)}`, { name: processName });
-    } catch (error) {
-      // A record left by a server that stopped answering: replace it.
-      if (!(error instanceof Error && error.message.includes("already running"))) throw error;
-      await box.process(processName).restart();
-    }
-  }
-  detail("Waiting for OpenCode to answer");
-  await runProgram(box, `. ${root}/env\n${waitScript}`, "Starting OpenCode", 150_000);
 }
 
 async function probeState(box: Box) {
@@ -323,11 +328,7 @@ export async function openCodeBusy(box: Box) {
  * differently, so after a failed stop, only nothing listening counts as stopped.
  */
 export async function stopOpenCode(box: Box) {
-  const stopped = await box.process(processName).stop().then(
-    () => true,
-    () => false,
-  );
-  if (!stopped && (await probeState(box)) !== "down") throw new Error("VM Bridge could not stop OpenCode on the VM.");
+  await runProgram(box, `[ -f ${passwordPath} ] || exit 0\n. ${root}/env\n${stopScript}`, "Stopping OpenCode", 30_000);
 }
 
 export class OpenCodeUnreachable extends Error {}
@@ -361,6 +362,26 @@ export class OpenCodeServer {
     } catch {
       // Fetch errors can include the preview URL, which may hold credentials.
       throw new OpenCodeUnreachable(`OpenCode on VM ${this.vmId} did not answer.`);
+    }
+  }
+
+  /** Whether `folder` is on the VM: OpenCode finds no location for one that is not (404). Null when it could not say. */
+  async hasFolder(folder: string) {
+    const query = new URLSearchParams({ "location[directory]": folder });
+    const response = await this.fetch(`/api/location?${query}`, { headers: new Headers(), signal: AbortSignal.timeout(10_000) });
+    await response.body?.cancel();
+    if (response.ok) return true;
+    return response.status === 404 ? false : null;
+  }
+
+  /** Whether OpenCode 2 runs here with this password. `/api/info` is new in 2, so OpenCode 1 does not answer it. */
+  async answers() {
+    try {
+      const response = await this.fetch("/api/info", { headers: new Headers(), signal: AbortSignal.timeout(5000) });
+      await response.body?.cancel();
+      return response.ok;
+    } catch {
+      return false;
     }
   }
 

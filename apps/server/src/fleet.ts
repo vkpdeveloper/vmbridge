@@ -130,6 +130,10 @@ export class Fleet extends EventEmitter<FleetEvents> {
   private readonly registrations = new Map<string, Promise<void>>();
   /** OpenCode on awake VMs, from its first use until the VM goes offline. */
   private readonly opencodes = new Map<string, Promise<OpenCodeServer>>();
+  /** VMs being woken for OpenCode (see `machine`), whose server starts while the wake prepares the VM. */
+  private readonly openCodeWakes = new Set<string>();
+  /** Machines woken from a sleep that ends their processes, so nothing of OpenCode runs there until VM Bridge starts it. */
+  private readonly restarted = new WeakSet<Box>();
   /** When each OpenCode worktree's base branch was last fetched, by `<vmId>/<name>`. */
   private readonly baseFetchedAt = new Map<string, number>();
   /** Previews of the relay to dev servers' ports (see `portPreview`), by the machine they were made on. */
@@ -412,6 +416,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
       if (id === vmId && !this.prepared.has(vmId)) detail?.(text);
     };
     this.on("wakeDetail", forward);
+    this.openCodeWakes.add(vmId);
     try {
       const wake = this.ensure(vmId);
       wake.catch(() => {});
@@ -423,6 +428,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
       return box;
     } finally {
       this.off("wakeDetail", forward);
+      this.openCodeWakes.delete(vmId);
     }
   }
 
@@ -498,6 +504,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
         }
       }
       this.boxes.set(vmId, box);
+      if (wasAsleep && !providers[vm.provider].features.keepsMemory) this.restarted.add(box);
       const woken = box;
       // A T3 server still running from before VM Bridge restarted may be in the middle of a turn: then the idle sweep restarts it later.
       const backend = await this.connect(vm, box, await version, async (preview) => {
@@ -551,6 +558,8 @@ export class Fleet extends EventEmitter<FleetEvents> {
     const credentials = await this.credentials(vm.provider);
     const fingerprint = credentialsFingerprint(credentials, this.store.encryption);
     this.emit("wakeDetail", vm.id, "Preparing the VM");
+    // Woken for OpenCode on a VM it ran on before, so its files and sign-ins are there: it starts beside the preparing.
+    const early = this.openCodeWakes.has(vm.id) && vm.opencodePassword && !this.opencodes.has(vm.id) ? this.openCodeFlight(vm.id, () => {}, box) : undefined;
     const [setup, preview] = await Promise.all([prepareVm(box, version, credentials, fingerprint), box.preview(t3Port)]);
     watch.lap("prepare VM, preview URL");
     if (setup.codexAuth) {
@@ -566,6 +575,7 @@ export class Fleet extends EventEmitter<FleetEvents> {
     // OpenCode reads the env file only as it starts. The next request for it starts it again. One that cannot be stopped
     // would keep the old sign-ins, so T3 keeps them too: the VM still counts as behind, and a later sweep tries again.
     if (restart && vm.opencodePassword) {
+      await early?.catch(() => {});
       this.opencodes.delete(vm.id);
       restart = await stopOpenCode(box).then(
         () => true,
@@ -818,16 +828,17 @@ export class Fleet extends EventEmitter<FleetEvents> {
     const server = await cached?.catch(() => null);
     if (server && !server.expiring) return server;
     if (cached && this.opencodes.get(vmId) === cached) this.opencodes.delete(vmId);
-    let flight = this.opencodes.get(vmId);
-    if (!flight) {
-      // Not under the VM's lock, which a wake holds until T3 answers. The lease keeps the VM from sleeping or restarting.
-      flight = this.exclusive(`opencode:${vmId}`, () => this.startOpenCode(vmId, detail));
-      this.opencodes.set(vmId, flight);
-      const started = flight;
-      started.catch(() => {
-        if (this.opencodes.get(vmId) === started) this.opencodes.delete(vmId);
-      });
-    }
+    return this.opencodes.get(vmId) ?? this.openCodeFlight(vmId, detail);
+  }
+
+  /** Starts OpenCode on the VM, or on `box` while it wakes, noted so later requests share it. A failed start is dropped. */
+  private openCodeFlight(vmId: string, detail: (text: string) => void, box?: Box) {
+    // Not under the VM's lock, which a wake holds until T3 answers. The lease keeps the VM from sleeping or restarting.
+    const flight = this.exclusive(`opencode:${vmId}`, () => this.startOpenCode(vmId, detail, box));
+    this.opencodes.set(vmId, flight);
+    flight.catch(() => {
+      if (this.opencodes.get(vmId) === flight) this.opencodes.delete(vmId);
+    });
     return flight;
   }
 
@@ -862,9 +873,9 @@ export class Fleet extends EventEmitter<FleetEvents> {
     }, () => {});
   }
 
-  private async startOpenCode(vmId: string, detail: (text: string) => void): Promise<OpenCodeServer> {
+  private async startOpenCode(vmId: string, detail: (text: string) => void, waking?: Box): Promise<OpenCodeServer> {
     const vm = this.store.vm(vmId);
-    const box = this.machineReady(vmId) ? this.boxes.get(vmId) : undefined;
+    const box = waking ?? (this.machineReady(vmId) ? this.boxes.get(vmId) : undefined);
     if (!vm || !box) throw new Error(`VM ${vmId} is not awake.`);
     const release = this.lease(vmId);
     // It starts in the checkout this VM holds. Clients can work in any folder on the VM, such as a worktree.
@@ -872,12 +883,19 @@ export class Fleet extends EventEmitter<FleetEvents> {
     const password = vm.opencodePassword ?? newToken();
     if (!vm.opencodePassword) this.store.updateVm(vmId, { opencodePassword: password });
     const started = performance.now();
+    const driver = this.driver(vm.provider);
+    const preview = driver.preview ? driver.preview(box, opencodePort) : box.preview(opencodePort);
+    preview.catch(() => {});
     try {
+      // OpenCode outlives VM Bridge, so after a restart it may run already: one request through the preview says so,
+      // where the start program takes several. Not on a machine just woken from a sleep that ended it.
+      if (vm.opencodePassword && !this.restarted.has(box)) {
+        const running = new OpenCodeServer(vmId, await preview, password, this.openSocket);
+        if (await running.answers()) return running;
+      }
       await startOpenCode(box, password, checkout, detail);
-      const driver = this.driver(vm.provider);
-      const preview = await (driver.preview ? driver.preview(box, opencodePort) : box.preview(opencodePort));
       this.traffic.record({ kind: "provider", operation: "start OpenCode", vmId, status: "ok", durationMs: Math.round(performance.now() - started) });
-      return new OpenCodeServer(vmId, preview, password, this.openSocket);
+      return new OpenCodeServer(vmId, await preview, password, this.openSocket);
     } catch (error) {
       if (!(error instanceof NoOpenCodeKey)) this.traffic.record({ kind: "provider", operation: "start OpenCode", vmId, status: "error", reason: message(error) });
       throw error;
@@ -1164,6 +1182,10 @@ printf '%s' "$base"`,
   /**
    * Finds a worktree `worktree` made, to open it again, on `vmId` when VM Bridge noted where it is. Otherwise it looks
    * on the project's awake VMs first, then wakes the others in turn. Answers its VM and branch.
+   *
+   * With `openCode`, the noted VM's OpenCode, started as soon as the VM is ready, answers whether the folder is there in
+   * one request, where a program on the VM takes several. Its answer has no branch (null). The program still runs,
+   * unawaited, to mend the worktree's links after a wake and note its branch.
    */
   async findWorktree(
     projectId: string,
@@ -1171,7 +1193,8 @@ printf '%s' "$base"`,
     progress: (detail: string) => void,
     detail?: (text: string) => void,
     vmId?: string,
-  ): Promise<{ vmId: string; path: string; branch: string }> {
+    openCode?: (vmId: string) => Promise<OpenCodeServer>,
+  ): Promise<{ vmId: string; path: string; branch: string | null }> {
     const project = this.project(projectId);
     const entries = project.vms.filter((entry) => {
       const state = this.store.vm(entry.vmId)?.state;
@@ -1183,13 +1206,28 @@ printf '%s' "$base"`,
       if (!this.machineReady(entry.vmId)) progress(vmId ? this.wakeStep(entry.vmId) : `Waking ${this.store.vm(entry.vmId)?.name ?? entry.vmId} to look for it`);
       const box = await this.machine(entry.vmId, detail);
       const path = worktreePath(entry.checkoutPath!, name);
-      const release = this.lease(entry.vmId);
-      try {
-        const branch = await runProgram(box, findWorktreeProgram(entry.checkoutPath!, name), "Opening the worktree");
-        if (branch.trim()) return { vmId: entry.vmId, path, branch: branch.trim() };
-      } finally {
-        release();
+      const find = () => {
+        const release = this.lease(entry.vmId);
+        return runProgram(box, findWorktreeProgram(entry.checkoutPath!, name), "Opening the worktree")
+          .then((branch) => branch.trim())
+          .finally(release);
+      };
+      if (vmId && openCode) {
+        const there = await openCode(entry.vmId)
+          .then((server) => server.hasFolder(path))
+          .catch(() => null);
+        if (there === false) break;
+        if (there) {
+          void find()
+            .then((branch) => {
+              if (branch) this.store.setOpenCodeWorktreeBranch(projectId, name, branch);
+            })
+            .catch((error: unknown) => this.failed("open worktree", error, { vmId: entry.vmId }));
+          return { vmId: entry.vmId, path, branch: null };
+        }
       }
+      const branch = await find();
+      if (branch) return { vmId: entry.vmId, path, branch };
     }
     throw new WorktreeGone(`No worktree ${name} on ${project.title}'s VMs. It may have been removed.`);
   }

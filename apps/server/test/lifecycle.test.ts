@@ -137,6 +137,12 @@ function setup(skillRoots?: string[]) {
   };
   /** Does what a program `prepareVm` or `writeCredentials` sends does to the files, and reports as `prepareVm` reads it. */
   const runProgram = (program: string) => {
+    // OpenCode's stop script.
+    if (program.includes("pkill -KILL")) {
+      if (opencode.failStop) return failed;
+      opencode.stops++;
+      return ok();
+    }
     Object.assign(files, programFiles(program));
     for (const [, paths] of program.matchAll(/^rm -f (.+)$/gm)) for (const path of paths!.split(" ")) delete files[path];
     const incoming = "/workspace/.vmbridge/codex/auth.json.incoming";
@@ -192,11 +198,8 @@ function setup(skillRoots?: string[]) {
       order.push("start");
       startServer();
     },
-    process: (name: string) => ({
-      stop: async () => {
-        if (name === "opencode" && opencode.failStop) throw new Error("The provider did not answer.");
-        if (name === "opencode") opencode.stops++;
-      },
+    process: () => ({
+      stop: async () => {},
       restart: async () => {
         server.restarts++;
         order.push("restart");
